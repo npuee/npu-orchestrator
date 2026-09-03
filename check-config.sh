@@ -11,7 +11,7 @@ echo "Running NPU Orchestrator Pre-Flight Verification..."
 
 if docker ps --format '{{.Names}}' | grep -q "^npu-orchestrator$"; then
     # Container is running: run diagnostics inside the running container
-    docker exec -t npu-orchestrator python3 -m app.core.preflight
+    docker exec -i npu-orchestrator python3 -m app.core.preflight
 else
     # Container is not running: run in a temporary disposable container and auto-remove (--rm)
     docker compose run --rm orchestrator python3 -m app.core.preflight

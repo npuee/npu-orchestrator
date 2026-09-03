@@ -1,0 +1,35 @@
+# Local Configuration & Secrets (NEVER COMMIT)
+.env
+*.env
+*.pem
+*.key
+config.yml
+
+# Persistent Application Data & Databases
+data/
+*.db
+*.sqlite3
+
+# Python Caches & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# IDE & Editor Configs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# AI Agent Workspace Context (Local Only)
+.agent
+.agent*
+.agents/
+AGENTS.md
+
+# OS Artifacts
+.DS_Store
+Thumbs.db

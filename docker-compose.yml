@@ -1,0 +1,34 @@
+name: npu-orchestrator
+
+services:
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: npu-orchestrator:latest
+    container_name: npu-orchestrator
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./data:/data
+      - ./config.yml:/app/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /cloud/traefik:/cloud/traefik:ro
+    group_add:
+      - 989
+    env_file:
+      - .env
+    environment:
+      - PORT=8090
+      - HOST=0.0.0.0
+      - SQLITE_DB_PATH=/data/orchestrator.db
+    networks:
+      - default
+      - signal-network
+
+networks:
+  default:
+  signal-network:
+    external: true
+    name: signal-stack_signal-internal-network

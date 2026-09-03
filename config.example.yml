@@ -1,0 +1,77 @@
+# ==============================================================================
+# NPU Orchestrator - Appliance Configuration
+# ==============================================================================
+# This file controls the behaviour of your orchestrator.
+# It is safe to edit and is never transmitted anywhere.
+#
+# IMPORTANT: Credentials (passwords, API tokens) belong in .env, not here.
+# This file only contains non-secret topology and default settings.
+#
+# After editing this file, restart the container:
+#   docker compose restart
+# ==============================================================================
+
+version: "1.0"
+
+# ── NetBox Default Assignments ─────────────────────────────────────────────────
+# These IDs are used when provisioning a new VM or container.
+# They are automatically populated when you run ./install.sh
+# You can find IDs in NetBox by navigating to the object and checking the URL.
+defaults:
+  tenant_id: 1       # NetBox Tenant ID  (e.g. /tenancy/tenants/6/)
+  site_id: 1         # NetBox Site ID    (e.g. /dcim/sites/2/)
+  cluster_id: 1      # NetBox Cluster ID (e.g. /virtualization/clusters/2/)
+  role_vm_id: 16     # Role ID for Virtual Machines
+  role_lxc_id: 15    # Role ID for LXC Containers
+  storage: "local-zfs"  # Proxmox storage pool name (fallback if not set per-cluster)
+  bridge: "vmbr0"         # Proxmox network bridge name (fallback if not set per-cluster)
+
+# ── Hardware Fallbacks ────────────────────────────────────────────────────────
+# Emergency default specs if a VM is created without a VM Type and blank sliders.
+# Note: You can create & customize VM sizing profiles directly in NetBox UI:
+#   NetBox → Virtualization → VM Types (e.g. Small: 1C/1G, Standard: 2C/4G, etc.)
+fallbacks:
+  cores: 2                  # Default vCPU cores
+  memory_mb: 2048           # Default RAM in MB (2048 = 2GB)
+  disk_gb: 20               # Default root disk size in GB
+
+# ── Proxmox Template Settings ─────────────────────────────────────────────────
+# Controls how the orchestrator selects templates when cloning VMs.
+templates:
+  linux_vmid_prefix: "90"           # Linux templates live in VMID range 9000-9099
+  windows_vmid_prefix: "92"         # Windows templates live in VMID range 9200-9299
+  default_windows_password: "P@ssw0rdInitial!"  # Initial Administrator password for Windows VMs
+
+# ── Traefik Ingress Synchronization ───────────────────────────────────────────
+# The orchestrator can scan your Traefik reverse proxy instances and register
+# all your web services (domain names, URLs, SSO tags) in NetBox automatically.
+#
+# Two connection types are supported:
+#   docker - connects to the local Docker socket to read Traefik config files
+#   api    - connects to a remote Traefik instance via its REST API
+#
+# Add one entry per Traefik instance. netbox_vm_id is the ID of the VM running
+# that Traefik instance in NetBox (used to link services to the right host).
+traefik:
+  enabled: true
+  sync_interval_minutes: 15
+  instances:
+    - name: "traefik-main"          # Friendly name (shown in logs)
+      netbox_vm_id: 7               # NetBox VM ID of the server running this Traefik
+      type: "docker"                # Use "docker" if Traefik runs on this same host
+      path: "/cloud/traefik"        # Traefik config directory on disk
+      conf_dir: "/cloud/traefik/conf"  # Traefik dynamic config directory
+    - name: "traefik-remote"        # Remote Traefik instance (API mode)
+      netbox_vm_id: 8               # NetBox VM ID of the server running this Traefik
+      type: "api"                   # Use "api" for remote instances
+      api_url: "http://10.0.0.10:8080"  # Traefik API address
+
+# ── DNS Management ────────────────────────────────────────────────────────────
+# When a VM is created, the orchestrator can automatically create DNS records
+# in NetBox DNS (requires the netbox-dns plugin to be installed in NetBox).
+#
+# Set auto_register_a and auto_register_ptr to false if you don't use NetBox DNS.
+dns:
+  default_zone: "example.internal"  # Your internal DNS domain (e.g. "home.lab", "company.local", "corp.net")
+  auto_register_a: true             # Create forward DNS records (hostname → IP)
+  auto_register_ptr: true           # Create reverse DNS records (IP → hostname)

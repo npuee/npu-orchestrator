@@ -76,13 +76,13 @@ def get_required_custom_fields() -> List[Dict[str, Any]]:
     svc_specs = [
         (field_fqdn, "fqdn", "FQDN / Domain", "text", "Fully Qualified Domain Name or hostname (e.g. media.example.com)"),
         (field_public_url, "public_url", "Public URL", "url", "Full Public HTTPS/HTTP URL (e.g. https://media.example.com)"),
+        (field_middlewares, "middlewares", "Middlewares", "text", "Active Traefik Middleware Chain"),
         (field_sso, "sso_protected", "SSO Protected", "boolean", "Protected by Single Sign-On (SSO / ForwardAuth)"),
         (field_whitelist, "ip_whitelist", "IP Whitelist", "boolean", "Restricted to specific IP Whitelist / Allowlist"),
-        (field_middlewares, "middlewares", "Middlewares", "text", "Active Traefik Middleware Chain"),
     ]
 
     for actual_name, default_name, default_label, field_type, description in svc_specs:
-        if actual_name:
+        if actual_name and not any(f["name"] == actual_name for f in fields):
             label = default_label
             if actual_name != default_name:
                 label = str(actual_name).replace("-", " ").replace("_", " ").title()
@@ -93,6 +93,24 @@ def get_required_custom_fields() -> List[Dict[str, Any]]:
                 "object_types": ["ipam.service"],
                 "description": description,
             })
+
+    # Dynamically register all custom middlewares defined under traefik.middlewares (e.g. WAF, RateLimit)
+    if isinstance(mw_cfg, dict):
+        for mw_key, mw_data in mw_cfg.items():
+            if isinstance(mw_data, dict):
+                custom_name = mw_data.get("netbox_field")
+                if custom_name and not any(f["name"] == custom_name for f in fields):
+                    clean = str(custom_name).replace("-", " ").replace("_", " ")
+                    words = [w.upper() if w.lower() in ("waf", "sso", "ip", "url", "dns") else w.title() for w in clean.split()]
+                    label = " ".join(words)
+                    title_key = mw_key.upper() if mw_key.lower() == "waf" else mw_key.replace("_", " ").title()
+                    fields.append({
+                        "name": custom_name,
+                        "label": label,
+                        "type": "boolean",
+                        "object_types": ["ipam.service"],
+                        "description": f"Protected by {title_key} Middleware",
+                    })
 
     return fields
 

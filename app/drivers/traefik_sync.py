@@ -29,44 +29,72 @@ class TraefikSyncDriver:
     def __init__(self):
         self._cached_service_tags: Optional[List[Dict[str, str]]] = None
 
-    def evaluate_middlewares(self, middlewares: Any) -> Tuple[bool, bool]:
+    def evaluate_configured_middlewares(self, middlewares: Any) -> Dict[str, bool]:
         """
-        Evaluates whether the given middlewares match configured patterns for
-        ip_whitelist and sso_protected.
-        Supports Option 2 schema (traefik.middlewares.<name>.patterns) as well as
-        legacy schema (traefik.middleware_patterns.<name>).
+        Evaluates middlewares against all configured middleware features in config.yml.
+        Returns a mapping of target NetBox custom field name -> boolean match.
+        Supports any custom middleware block under traefik.middlewares (e.g. WAF, RateLimit, SSO).
         """
         traefik_cfg = app_config.traefik if app_config else {}
         mw_cfg = traefik_cfg.get("middlewares", {})
-
-        # Check Option 2: middlewares.ip_whitelist.patterns / middlewares.whitelist.patterns
-        whitelist_patterns = []
-        if isinstance(mw_cfg.get("ip_whitelist"), dict):
-            whitelist_patterns = mw_cfg["ip_whitelist"].get("patterns", [])
-        elif isinstance(mw_cfg.get("whitelist"), dict):
-            whitelist_patterns = mw_cfg["whitelist"].get("patterns", [])
-        if not whitelist_patterns:
-            legacy_pats = traefik_cfg.get("middleware_patterns", {})
-            whitelist_patterns = legacy_pats.get("ip_whitelist") or legacy_pats.get("whitelist") or ["whitelist", "allowlist", "npu-ip-whitelist"]
-
-        # Check Option 2: middlewares.sso.patterns / middlewares.sso_protected.patterns
-        sso_patterns = []
-        if isinstance(mw_cfg.get("sso"), dict):
-            sso_patterns = mw_cfg["sso"].get("patterns", [])
-        elif isinstance(mw_cfg.get("sso_protected"), dict):
-            sso_patterns = mw_cfg["sso_protected"].get("patterns", [])
-        if not sso_patterns:
-            legacy_pats = traefik_cfg.get("middleware_patterns", {})
-            sso_patterns = legacy_pats.get("sso") or legacy_pats.get("sso_protected") or ["sso", "forward-auth", "authelia", "authentik", "npu-sso"]
+        legacy_pats = traefik_cfg.get("middleware_patterns", {})
+        legacy_cf = traefik_cfg.get("custom_fields", {})
 
         if isinstance(middlewares, (list, tuple, set)):
             m_str = " ".join(str(m) for m in middlewares).lower()
         else:
             m_str = str(middlewares or "").lower()
 
-        is_whitelist = any(str(pat).lower() in m_str for pat in whitelist_patterns)
-        is_sso = any(str(pat).lower() in m_str for pat in sso_patterns)
-        return is_whitelist, is_sso
+        results: Dict[str, bool] = {}
+
+        # 1. Process all configured entries under traefik.middlewares
+        if mw_cfg and isinstance(mw_cfg, dict):
+            for mw_key, mw_data in mw_cfg.items():
+                if isinstance(mw_data, dict):
+                    field_name = mw_data.get("netbox_field")
+                    patterns = mw_data.get("patterns", [])
+                    if field_name:
+                        matched = any(str(p).lower() in m_str for p in patterns) if patterns else False
+                        results[field_name] = matched
+
+        # 2. Fallbacks for standard/legacy custom_fields keys if not in mw_cfg
+        field_whitelist = (
+            (mw_cfg.get("ip_whitelist", {}) if isinstance(mw_cfg.get("ip_whitelist"), dict) else {}).get("netbox_field")
+            or (mw_cfg.get("whitelist", {}) if isinstance(mw_cfg.get("whitelist"), dict) else {}).get("netbox_field")
+            or legacy_cf.get("ip_whitelist", "ip_whitelist")
+        )
+        if field_whitelist not in results:
+            wl_patterns = legacy_pats.get("ip_whitelist") or legacy_pats.get("whitelist") or ["whitelist", "allowlist", "npu-ip-whitelist"]
+            results[field_whitelist] = any(str(p).lower() in m_str for p in wl_patterns)
+
+        field_sso = (
+            (mw_cfg.get("sso", {}) if isinstance(mw_cfg.get("sso"), dict) else {}).get("netbox_field")
+            or (mw_cfg.get("sso_protected", {}) if isinstance(mw_cfg.get("sso_protected"), dict) else {}).get("netbox_field")
+            or legacy_cf.get("sso_protected", "sso_protected")
+        )
+        if field_sso not in results:
+            sso_patterns = legacy_pats.get("sso") or legacy_pats.get("sso_protected") or ["sso", "forward-auth", "authelia", "authentik", "npu-sso"]
+            results[field_sso] = any(str(p).lower() in m_str for p in sso_patterns)
+
+        return results
+
+    def evaluate_middlewares(self, middlewares: Any) -> Tuple[bool, bool]:
+        """
+        Backwards-compatible tuple return (is_whitelist, is_sso).
+        """
+        traefik_cfg = app_config.traefik if app_config else {}
+        mw_cfg = traefik_cfg.get("middlewares", {})
+        legacy_cf = traefik_cfg.get("custom_fields", {})
+        field_whitelist = (
+            (mw_cfg.get("ip_whitelist", {}) if isinstance(mw_cfg.get("ip_whitelist"), dict) else {}).get("netbox_field")
+            or legacy_cf.get("ip_whitelist", "ip_whitelist")
+        )
+        field_sso = (
+            (mw_cfg.get("sso", {}) if isinstance(mw_cfg.get("sso"), dict) else {}).get("netbox_field")
+            or legacy_cf.get("sso_protected", "sso_protected")
+        )
+        matches = self.evaluate_configured_middlewares(middlewares)
+        return matches.get(field_whitelist, False), matches.get(field_sso, False)
 
     def get_configured_tag_names(self) -> List[str]:
         """
@@ -256,6 +284,7 @@ class TraefikSyncDriver:
                                     combined_middlewares.append(rm)
 
                             middlewares_str = ", ".join(combined_middlewares)
+                            mw_matches = self.evaluate_configured_middlewares(combined_middlewares)
                             ip_whitelist, sso_protected = self.evaluate_middlewares(combined_middlewares)
                             tags = self.get_service_tags()
 
@@ -281,6 +310,7 @@ class TraefikSyncDriver:
                                 "sso_protected": sso_protected,
                                 "ip_whitelist": ip_whitelist,
                                 "middlewares": middlewares_str,
+                                "middleware_matches": mw_matches,
                                 "tags": tags,
                                 "source": "docker",
                             })
@@ -334,6 +364,7 @@ class TraefikSyncDriver:
                                 combined_middlewares.append(rm)
 
                         middlewares_str = ", ".join(combined_middlewares)
+                        mw_matches = self.evaluate_configured_middlewares(combined_middlewares)
                         ip_whitelist, sso_protected = self.evaluate_middlewares(combined_middlewares)
                         tags = self.get_service_tags()
 
@@ -361,6 +392,7 @@ class TraefikSyncDriver:
                             "sso_protected": sso_protected,
                             "ip_whitelist": ip_whitelist,
                             "middlewares": middlewares_str,
+                            "middleware_matches": mw_matches,
                             "tags": tags,
                             "source": "file",
                         })
@@ -413,6 +445,7 @@ class TraefikSyncDriver:
                     # Middlewares
                     middlewares = r.get("middlewares", [])
                     middlewares_str = ", ".join(middlewares)
+                    mw_matches = self.evaluate_configured_middlewares(middlewares)
                     ip_whitelist, sso_protected = self.evaluate_middlewares(middlewares)
                     tags = self.get_service_tags()
 
@@ -432,6 +465,7 @@ class TraefikSyncDriver:
                         "sso_protected": sso_protected,
                         "ip_whitelist": ip_whitelist,
                         "middlewares": middlewares_str,
+                        "middleware_matches": mw_matches,
                         "tags": tags,
                         "source": "remote-api",
                     })
@@ -577,12 +611,17 @@ class TraefikSyncDriver:
                     custom_fields_payload[field_fqdn] = r["fqdn"]
                 if field_public_url:
                     custom_fields_payload[field_public_url] = r["public_url"]
-                if field_sso:
-                    custom_fields_payload[field_sso] = r["sso_protected"]
-                if field_whitelist:
-                    custom_fields_payload[field_whitelist] = r["ip_whitelist"]
                 if field_middlewares:
                     custom_fields_payload[field_middlewares] = r["middlewares"]
+                # Write all configured middleware boolean fields (ip_whitelist, sso, WAF, etc.)
+                for mw_field, mw_val in r.get("middleware_matches", {}).items():
+                    if mw_field:
+                        custom_fields_payload[mw_field] = mw_val
+                # Ensure standard fields are set even if middleware_matches is missing (fallback)
+                if field_sso and field_sso not in custom_fields_payload:
+                    custom_fields_payload[field_sso] = r.get("sso_protected", False)
+                if field_whitelist and field_whitelist not in custom_fields_payload:
+                    custom_fields_payload[field_whitelist] = r.get("ip_whitelist", False)
 
                 service_payload = {
                     "name": r["name"],
@@ -604,15 +643,15 @@ class TraefikSyncDriver:
                     curr_tags = [t.get("slug") for t in existing_svc.get("tags", [])]
                     new_tags = [t["slug"] for t in r["tags"]]
 
+                    mw_matches = r.get("middleware_matches", {})
                     needs_update = (
                         curr_name != r["name"]
                         or curr_desc != r["description"]
                         or curr_ports != r["ports"]
                         or (field_public_url and curr_cf.get(field_public_url) != r["public_url"])
                         or (field_fqdn and curr_cf.get(field_fqdn) != r["fqdn"])
-                        or (field_sso and curr_cf.get(field_sso) != r["sso_protected"])
-                        or (field_whitelist and curr_cf.get(field_whitelist) != r["ip_whitelist"])
                         or (field_middlewares and curr_cf.get(field_middlewares) != r["middlewares"])
+                        or any(curr_cf.get(f) != v for f, v in mw_matches.items() if f)
                         or set(curr_tags) != set(new_tags)
                     )
 

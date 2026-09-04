@@ -641,7 +641,14 @@ class TraefikSyncDriver:
                     curr_ports = existing_svc.get("ports", [])
                     curr_cf = existing_svc.get("custom_fields", {})
                     curr_tags = [t.get("slug") for t in existing_svc.get("tags", [])]
-                    new_tags = [t["slug"] for t in r["tags"]]
+                    config_slugs = {t["slug"] for t in r["tags"]}
+                    existing_slugs = set(curr_tags)
+                    # Merge: keep every existing tag, add only missing config tags
+                    merged_tags = list(existing_svc.get("tags", []))
+                    for t in r["tags"]:
+                        if t["slug"] not in existing_slugs:
+                            merged_tags.append(t)
+                    missing_config_tags = config_slugs - existing_slugs
 
                     mw_matches = r.get("middleware_matches", {})
                     needs_update = (
@@ -652,7 +659,7 @@ class TraefikSyncDriver:
                         or (field_fqdn and curr_cf.get(field_fqdn) != r["fqdn"])
                         or (field_middlewares and curr_cf.get(field_middlewares) != r["middlewares"])
                         or any(curr_cf.get(f) != v for f, v in mw_matches.items() if f)
-                        or set(curr_tags) != set(new_tags)
+                        or bool(missing_config_tags)
                     )
 
                     if needs_update:
@@ -663,7 +670,7 @@ class TraefikSyncDriver:
                                 "name": r["name"],
                                 "description": r["description"],
                                 "ports": r["ports"],
-                                "tags": r["tags"],
+                                "tags": merged_tags,
                                 "custom_fields": custom_fields_payload,
                             },
                         )

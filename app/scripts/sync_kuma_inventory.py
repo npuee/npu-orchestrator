@@ -46,7 +46,13 @@ async def fetch_devices_partitioned() -> Tuple[List[Dict[str, Any]], List[Dict[s
         raise RuntimeError(f"NetBox API returned HTTP {resp.status_code}: {resp.text}")
     devices = resp.json().get("results", [])
 
-    exclude_tags = [t.strip().lower() for t in app_config.uptime_kuma.get("exclude_tags", ["no-monitor"])]
+    # Read from new nested devices config; fall back to legacy flat keys for compatibility
+    devices_cfg = app_config.uptime_kuma.get("devices", {})
+    exclude_tag = devices_cfg.get("exclude_tag") or ""
+    # Legacy fallback: old config used exclude_tags as a list
+    legacy_exclude = app_config.uptime_kuma.get("exclude_tags", [])
+    exclude_tags = {exclude_tag.strip().lower()} if exclude_tag else set()
+    exclude_tags.update(t.strip().lower() for t in legacy_exclude if t.strip())
 
     monitored_devices = []
     excluded_devices = []

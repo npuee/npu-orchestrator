@@ -36,6 +36,7 @@ async def orchestrator_background_reconciler_loop():
     last_telemetry_sync = 0
     last_template_sync = 0
     last_kuma_sync = 0
+    last_kuma_services_sync = 0
     last_db_prune = 0
 
     while True:
@@ -86,12 +87,13 @@ async def orchestrator_background_reconciler_loop():
                         module_manager.set_module_status("templates", "error", error=str(e))
                     last_template_sync = now
 
-            # 4. NetBox Inventory -> Uptime Kuma Monitoring Synchronization (Optional Module)
+            # 4. NetBox Inventory -> Uptime Kuma Device Ping Monitoring (Optional Module)
             if module_manager.is_enabled("uptime_kuma"):
                 kuma_cfg = app_config.uptime_kuma
-                kuma_interval = kuma_cfg.get("sync_interval_minutes", 30) * 60
+                devices_cfg = kuma_cfg.get("devices", {})
+                kuma_interval = devices_cfg.get("sync_interval_minutes", kuma_cfg.get("sync_interval_minutes", 30)) * 60
                 if now - last_kuma_sync >= kuma_interval:
-                    logger.info("Executing scheduled NetBox -> Uptime Kuma Inventory sync (every %d mins)...", kuma_cfg.get("sync_interval_minutes", 30))
+                    logger.info("Executing scheduled NetBox -> Uptime Kuma Device sync (every %d mins)...", kuma_interval // 60)
                     try:
                         from app.scripts.sync_kuma_inventory import run_sync
                         k_res = await run_sync()
@@ -100,9 +102,23 @@ async def orchestrator_background_reconciler_loop():
                             "url": settings.UPTIME_KUMA_URL,
                         })
                     except Exception as e:
-                        logger.warning("Scheduled Uptime Kuma sync encountered an error: %s", e)
+                        logger.warning("Scheduled Uptime Kuma device sync encountered an error: %s", e)
                         module_manager.set_module_status("uptime_kuma", "error", error=str(e))
                     last_kuma_sync = now
+
+            # 4b. NetBox Services -> Uptime Kuma HTTP Monitor Sync (Optional, requires services.enabled: true)
+            if module_manager.is_enabled("uptime_kuma"):
+                svc_cfg = app_config.uptime_kuma.get("services", {})
+                if svc_cfg.get("enabled", False):
+                    svc_interval = svc_cfg.get("sync_interval_minutes", 15) * 60
+                    if now - last_kuma_services_sync >= svc_interval:
+                        logger.info("Executing scheduled NetBox Services -> Uptime Kuma HTTP sync (every %d mins)...", svc_interval // 60)
+                        try:
+                            from app.scripts.sync_kuma_services import run_sync as run_services_sync
+                            await run_services_sync()
+                        except Exception as e:
+                            logger.warning("Scheduled Uptime Kuma services sync encountered an error: %s", e)
+                        last_kuma_services_sync = now
 
             # 5. Database Historical Job Retention Pruning (Core Maintenance)
             db_cfg = app_config.database
@@ -206,17 +222,27 @@ async def run_startup_syncs():
     # 4. NetBox Inventory -> Uptime Kuma Module
     if module_manager.is_enabled("uptime_kuma") and app_config.uptime_kuma.get("sync_on_startup", True):
         try:
-            logger.info("Running background NetBox -> Uptime Kuma inventory sync on startup...")
+            logger.info("Running background NetBox -> Uptime Kuma device inventory sync on startup...")
             from app.scripts.sync_kuma_inventory import run_sync
             k_res = await run_sync()
             module_manager.set_module_status("uptime_kuma", "connected", {
                 "monitored_devices": k_res.get("total_monitored", 0),
                 "url": settings.UPTIME_KUMA_URL,
             })
-            logger.info("Background Uptime Kuma startup sync completed: %d newly provisioned, %d existing.", k_res.get("created_count", 0), k_res.get("existing_count", 0))
+            logger.info("Uptime Kuma device sync completed: %d created, %d existing.", k_res.get("created_count", 0), k_res.get("existing_count", 0))
         except Exception as exc:
-            logger.warning("Startup Uptime Kuma sync encountered an issue: %s", exc)
+            logger.warning("Startup Uptime Kuma device sync encountered an issue: %s", exc)
             module_manager.set_module_status("uptime_kuma", "error", error=str(exc))
+
+        # Also run services sync on startup if enabled
+        svc_cfg = app_config.uptime_kuma.get("services", {})
+        if svc_cfg.get("enabled", False):
+            try:
+                logger.info("Running background NetBox Services -> Uptime Kuma HTTP sync on startup...")
+                from app.scripts.sync_kuma_services import run_sync as run_services_sync
+                await run_services_sync()
+            except Exception as exc:
+                logger.warning("Startup Uptime Kuma services sync encountered an issue: %s", exc)
     else:
         logger.info("Module 'uptime_kuma' is not configured or disabled; skipping startup load.")
 

@@ -219,3 +219,47 @@ async def sync_netbox_to_uptime_kuma():
         logger.exception("Error synchronizing NetBox to Uptime Kuma: %s", e)
         module_manager.set_module_status("uptime_kuma", "error", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/uptime-kuma/services", summary="Preview NetBox Application Services for Uptime Kuma HTTP Monitoring")
+async def preview_uptime_kuma_services_sync():
+    """
+    Scans NetBox Application Services tagged with the configured source_tag
+    and previews which HTTP monitors would be created/deleted — no modifications made.
+    """
+    if not module_manager.is_enabled("uptime_kuma"):
+        return {"status": "disabled", "message": "Uptime Kuma module is disabled in config.yml or missing credentials in .env"}
+
+    try:
+        from app.scripts.sync_kuma_services import preview_sync
+        return await preview_sync()
+    except Exception as e:
+        logger.exception("Error previewing Uptime Kuma services sync: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/uptime-kuma/services", summary="Synchronize NetBox Application Services to Uptime Kuma HTTP Monitors")
+async def sync_services_to_uptime_kuma():
+    """
+    Fetches NetBox Application Services tagged with the configured source_tag
+    and provisions HTTP monitors in Uptime Kuma under the configured group.
+    Services tagged with exclude_tag (e.g. no-monitor) are skipped or removed.
+    Requires uptime_kuma.services.enabled: true in config.yml.
+    """
+    if not module_manager.is_enabled("uptime_kuma"):
+        return {"status": "disabled", "message": "Uptime Kuma module is disabled in config.yml or missing credentials in .env"}
+
+    try:
+        from app.scripts.sync_kuma_services import run_sync
+        from app.core.config import settings
+        res = await run_sync()
+        if res.get("status") != "disabled":
+            module_manager.set_module_status("uptime_kuma", "connected", {
+                "monitored_services": res.get("created_count", 0) + res.get("existing_count", 0),
+                "url": settings.UPTIME_KUMA_URL,
+            })
+        return res
+    except Exception as e:
+        logger.exception("Error synchronizing services to Uptime Kuma: %s", e)
+        module_manager.set_module_status("uptime_kuma", "error", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))

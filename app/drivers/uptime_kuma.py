@@ -159,11 +159,13 @@ class UptimeKumaDriver:
                             existing_by_name[m_name.lower()] = mid
 
                 cfg = app_config.uptime_kuma
-                group_by_site = cfg.get("group_by_site", True)
+                devices_cfg = cfg.get("devices", {})
+                # Support new nested keys; fall back to legacy flat keys
+                group_by_site = devices_cfg.get("group_by_site", cfg.get("group_by_site", True))
                 enable_default_notifs = cfg.get("enable_default_notifications", True)
-                ping_interval = cfg.get("ping_interval", 60)
-                ping_retry_interval = cfg.get("ping_retry_interval", 60)
-                max_retries = cfg.get("max_retries", 3)
+                ping_interval = devices_cfg.get("ping_interval", cfg.get("ping_interval", 60))
+                ping_retry_interval = devices_cfg.get("ping_retry_interval", cfg.get("ping_retry_interval", 60))
+                max_retries = devices_cfg.get("max_retries", cfg.get("max_retries", 3))
 
                 # Resolve default notification channels
                 default_notifs: Dict[int, bool] = {}
@@ -349,6 +351,150 @@ class UptimeKumaDriver:
         if detail.get("status") == "error":
             raise RuntimeError(detail.get("error"))
         return detail["monitor_id"], (detail.get("status") == "created")
+
+    async def sync_services_batch(
+        self,
+        services: List[Dict[str, Any]],
+        excluded_services: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
+        """
+        Batch synchronizes HTTP monitors for application services (e.g. Traefik routes).
+        - services: list of dicts with keys: name, url, description
+        - excluded_services: services to remove from Kuma (tagged no-monitor)
+        """
+        def _batch_sync():
+            with self.session() as api:
+                monitors = api.get_monitors()
+
+                existing_by_url: Dict[str, int] = {}
+                existing_by_name: Dict[str, int] = {}
+                monitor_map: Dict[int, Dict[str, Any]] = {}
+                groups: Dict[str, int] = {}
+
+                for m in monitors:
+                    mid = m["id"]
+                    monitor_map[mid] = m
+                    m_type = m.get("type")
+                    m_name = (m.get("name") or "").strip()
+                    m_url = (m.get("url") or "").strip().rstrip("/")
+
+                    if m_type == MonitorType.GROUP:
+                        groups[m_name.lower()] = mid
+                    else:
+                        if m_url:
+                            existing_by_url[m_url] = mid
+                        if m_name:
+                            existing_by_name[m_name.lower()] = mid
+
+                cfg = app_config.uptime_kuma
+                svc_cfg = cfg.get("services", {})
+                group_name = svc_cfg.get("group_name", "Web Services")
+                heartbeat_interval = svc_cfg.get("heartbeat_interval", 60)
+                accepted_statuses = svc_cfg.get("accepted_statuses", [200, 301, 302])
+                enable_default_notifs = cfg.get("enable_default_notifications", True)
+
+                # Resolve default notification channels
+                default_notifs: Dict[int, bool] = {}
+                if enable_default_notifs:
+                    try:
+                        all_notifs = api.get_notifications()
+                        for n in all_notifs:
+                            if n.get("isDefault"):
+                                default_notifs[n["id"]] = True
+                    except Exception as e:
+                        logger.warning("Could not fetch notifications from Uptime Kuma: %s", e)
+
+                # Ensure group exists
+                group_key = group_name.strip().lower()
+                if group_key in groups:
+                    parent_id = groups[group_key]
+                else:
+                    try:
+                        parent_id = self._add_monitor_safe(api, type=MonitorType.GROUP, name=group_name)
+                        groups[group_key] = parent_id
+                        logger.info("Created Uptime Kuma group '%s' (ID: %s)", group_name, parent_id)
+                    except Exception as e:
+                        logger.error("Failed to create group '%s': %s", group_name, e)
+                        parent_id = None
+
+                created_count = 0
+                existing_count = 0
+                deleted_count = 0
+                error_count = 0
+                details = []
+
+                # PHASE 1: Remove excluded services
+                if excluded_services:
+                    for ex in excluded_services:
+                        ex_name = ex["name"]
+                        ex_url = ex.get("url", "").rstrip("/")
+                        mid = existing_by_url.get(ex_url) or existing_by_name.get(ex_name.lower())
+                        if mid:
+                            try:
+                                api._call("deleteMonitor", mid)
+                                deleted_count += 1
+                                logger.info("Deleted HTTP monitor '%s' (excluded by tag)", ex_name)
+                                details.append({"name": ex_name, "url": ex_url, "monitor_id": mid, "status": "deleted_excluded"})
+                                existing_by_url.pop(ex_url, None)
+                                existing_by_name.pop(ex_name.lower(), None)
+                                time.sleep(0.6)
+                            except Exception as e:
+                                error_count += 1
+                                details.append({"name": ex_name, "url": ex_url, "error": str(e), "status": "error"})
+
+                # PHASE 2: Provision or reconcile services
+                for svc in services:
+                    name = svc["name"]
+                    url = svc.get("url", "").rstrip("/")
+                    desc = svc.get("description", f"Managed by NPU Orchestrator")
+
+                    if not url:
+                        logger.warning("Service '%s' has no public_url; skipping.", name)
+                        details.append({"name": name, "url": "", "status": "skipped_no_url"})
+                        continue
+
+                    existing_id = existing_by_url.get(url) or existing_by_name.get(name.lower())
+                    if existing_id:
+                        existing_count += 1
+                        details.append({"name": name, "url": url, "monitor_id": existing_id, "status": "existing"})
+                        continue
+
+                    kwargs = {
+                        "type": MonitorType.HTTP,
+                        "name": name,
+                        "url": url,
+                        "interval": heartbeat_interval,
+                        "description": desc,
+                        "accepted_statuscodes": [str(s) for s in accepted_statuses],
+                    }
+                    if parent_id:
+                        kwargs["parent"] = parent_id
+                    if default_notifs:
+                        kwargs["notificationIDList"] = default_notifs
+
+                    try:
+                        mid = self._add_monitor_safe(api, **kwargs)
+                        created_count += 1
+                        existing_by_url[url] = mid
+                        existing_by_name[name.lower()] = mid
+                        details.append({"name": name, "url": url, "monitor_id": mid, "status": "created"})
+                        logger.info("Created HTTP monitor '%s' -> %s (ID: %s)", name, url, mid)
+                    except Exception as e:
+                        error_count += 1
+                        details.append({"name": name, "url": url, "error": str(e), "status": "error"})
+                        logger.error("Failed to create HTTP monitor '%s': %s", name, e)
+
+                return {
+                    "status": "success" if error_count == 0 else "partial",
+                    "total_evaluated": len(services) + (len(excluded_services) if excluded_services else 0),
+                    "created_count": created_count,
+                    "existing_count": existing_count,
+                    "deleted_count": deleted_count,
+                    "error_count": error_count,
+                    "details": details,
+                }
+
+        return await asyncio.to_thread(_batch_sync)
 
     async def delete_monitor_by_hostname(self, hostname: str) -> bool:
         """Deletes a monitor matching the given hostname/IP."""

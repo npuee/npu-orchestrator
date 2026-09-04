@@ -11,6 +11,16 @@ router = APIRouter(prefix="/system", tags=["System Diagnostics"], dependencies=[
 async def run_preflight_check():
     """
     Validates secrets in .env, configuration in config.yml, and live
-    connectivity to NetBox and Proxmox VE. Returns a detailed report.
+    connectivity to NetBox, Proxmox VE, and Uptime Kuma.
     """
     return await preflight_checker.run_all_checks()
+
+
+@router.get("/proxmox-audit", summary="Run Proxmox VE Hypervisor & Cluster Audit")
+async def run_proxmox_audit():
+    """
+    Audits Proxmox VE hypervisor node, storage pools, network bridges,
+    and OS blueprint template inventory.
+    """
+    from app.scripts.audit_proxmox import proxmox_auditor
+    return await proxmox_auditor.run_audit()

@@ -25,3 +25,16 @@ async def get_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
     return job
+
+
+@router.post("/prune", summary="Manually prune historical jobs older than retention window")
+async def prune_historical_jobs(
+    days: int = Query(30, ge=1, le=365, description="Retention window in days (jobs older than this will be deleted)")
+):
+    """Prunes completed, failed, or interrupted jobs older than the specified days."""
+    deleted_count = await db.prune_old_jobs(days=days)
+    return {
+        "status": "success",
+        "deleted_count": deleted_count,
+        "retention_days": days,
+    }

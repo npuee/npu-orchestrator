@@ -1,6 +1,6 @@
 # NPU Infrastructure Orchestrator 🚀
 
-> **Turn NetBox into an automated, event-driven Private Cloud Orchestrator for Proxmox VE.**
+> **Turn NetBox into a zero-touch, event-driven Private Cloud Orchestrator for Proxmox VE.**
 
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB.svg?style=flat&logo=python&logoColor=white)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg?style=flat&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
@@ -8,343 +8,283 @@
 [![NetBox](https://img.shields.io/badge/NetBox-4.x-004D40.svg?style=flat&logo=netbox&logoColor=white)](https://netboxlabs.com)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg?style=flat&logo=docker&logoColor=white)](https://docker.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.0.2-green.svg)](app/__init__.py)
 
 ---
 
-## ⚡ The Problem vs. The Solution
+## ⚡ 3-Minute Quickstart
 
-### Without NPU Orchestrator (Manual Hell)
-1. Open Proxmox → manually clone a VM or container template.
-2. Calculate an unused IP, configure the gateway, DNS, and bridge.
-3. Boot machine → SSH in or open VNC console to inject keys, passwords, and resize disks.
-4. Open your DNS server → manually create forward `A` and reverse `PTR` records.
-5. Open NetBox → manually type in the VMID, RAM, vCPU, IP, and status.
-6. *Did you remember to update reverse proxy routes? Did someone take an IP collision?*
-⏱️ **Time lost: 20–30 minutes per machine.**
+Get NPU Orchestrator running with **3 commands**:
 
-### With NPU Orchestrator (Event-Driven Cloud)
-1. In NetBox, click **Add Virtual Machine**:
-   - **Name**: `db-node-01`
-   - **Platform**: `Ubuntu 24.04 LTS (Noble) (VMID: 9024)` *(Auto-synced from Proxmox)*
-   - **VM Type**: `Medium (2C / 4GB)` *(Managed by you in NetBox)*
-2. Click **Save**.
-☕ **That's it.** Within ~45 seconds, the VM is cloned, Cloud-Init configured, IP allocated, DNS records registered, disk expanded, and live status updated.
-
----
-
-## 🏗️ Architectural Philosophy
-
-NPU Orchestrator adheres strictly to the **NetBox as Single Source of Truth (SSoT)** principle with complete separation of concerns:
-
-```text
-┌────────────────────────────────────────────────────────────────────────┐
-│                        NetBox Source of Truth                          │
-│                                                                        │
-│   ┌───────────────────────────┐     ┌──────────────────────────────┐   │
-│   │     Platform (The OS)     │     │      VM Type (The Flavor)    │   │
-│   │  Auto-synced from Proxmox │     │    User-managed in NetBox    │   │
-│   │   • Ubuntu 24.04 (9024)   │     │    • Micro:   1C / 1G / 15G  │   │
-│   │   • Ubuntu 26.04 (9026)   │  +  │    • Small:   2C / 2G / 25G  │   │
-│   │   • Win Server 2025 (9225)│     │    • Medium:  2C / 4G / 40G  │   │
-│   │   • Debian 12 LXC         │     │    • Large:   4C / 8G / 80G  │   │
-│   └─────────────┬─────────────┘     └──────────────┬───────────────┘   │
-│                 │                                  │                   │
-│                 └─────────────────┬────────────────┘                   │
-│                                   ▼                                    │
-│                    Virtual Machine: db-node-01                         │
-│                    • Status: Active                                    │
-│                    • Primary IP: 192.168.1.50/24                          │
-│                    • Cluster: Lohusuu PVE Cluster                      │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │  Webhook Event (HMAC-SHA512)
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                      NPU Automation Orchestrator                       │
-│    FastAPI Core  •  Async Worker Engine  •  Proxmox & NetBox Drivers   │
-└───────────────────┬────────────────────────────────┬───────────────────┘
-                    │                                │
-                    ▼                                ▼
-       ┌────────────────────────┐       ┌────────────────────────┐
-       │   Proxmox VE Cluster   │       │     NetBox DNS / IPAM  │
-       │  • Clone VM/CT         │       │  • Forward 'A' Records │
-       │  • Apply vCPU/RAM/Disk │       │  • Reverse 'PTR' Record│
-       │  • Inject Cloud-Init   │       │  • IP Allocation Guard │
-       │  • Start on Boot       │       │  • Telemetry Metric Sync│
-       └────────────────────────┘       └────────────────────────┘
-```
-
----
-
-## ✨ Features at a Glance
-
-### 🚀 Zero-Touch Automated Provisioning
-- **Linux VMs (KVM/QEMU)**: Instant full/linked cloning, Cloud-Init network configuration, automated SSH authorized_keys injection, and disk expansion.
-- **Windows Server VMs**: Automated cloning with Sysprep / Cloudbase-Init compatibility and Administrator credential provisioning.
-- **LXC System Containers**: Instant unprivileged container creation from Proxmox `.tar.zst` storage archives with static networking and SSH key injection.
-
-### 🔄 Bidirectional Proxmox ➔ NetBox Template Sync
-- **Full Discovery**: Continuously monitors Proxmox for both **QEMU VM templates** (VMID 9000–9299) and **LXC Container archives** on all storage pools.
-- **Deterministic Metadata**: Automatically registers each template as a clean `Platform` with exact reference IDs (`[Proxmox VM Template: 9024]`).
-- **Safe Orphan Deletion**: When you delete a template from Proxmox:
-  - If **0 VMs** are using it: Automatically deleted from NetBox.
-  - If **active VMs** are using it: Automatically marked `[Deprecated]` to safeguard historical inventory data without breaking foreign keys.
-
-### 🎛️ 100% User-Managed Hardware Sizing
-- Never edit configuration files to add a new server size! Manage all flavors directly inside **NetBox UI** (`Virtualization → VM Types`).
-- Define `Micro (1C/1G)`, `Standard (2C/4G)`, `Heavy (8C/16G)` or custom sizes.
-- Select a VM Type, and NetBox automatically pre-fills the vCPU, Memory, and Disk sliders.
-- Emergency fallbacks in `config.yml` protect against unassigned fields.
-
-### 📊 Real-Time Telemetry & Metric Sync
-- Periodically queries Proxmox VE performance counters.
-- Automatically pushes **24-hour average & peak CPU usage**, **RAM allocation**, **disk consumption**, and **uptime status** back into NetBox custom fields.
-
-### 🌐 Traefik Ingress Synchronization
-- Scans Traefik reverse proxy instances (Docker socket or HTTP API).
-- Automatically catalogs routers, services, domain names, TLS status, and auth middleware inside NetBox.
-
-### 🔒 Enterprise Hardened
-- **Signature Verification**: Every incoming webhook is authenticated using HMAC-SHA512 signature checking.
-- **API Key RBAC**: REST endpoints are guarded by high-entropy API authentication headers.
-- **Secure Sandbox**: Runs strictly as an unprivileged, non-root user (`appuser:10001`) inside lightweight Docker containers.
-
----
-
-## ⚡ Quickstart Deployment
-
-### Prerequisites
-- Linux host with **Docker** & **Docker Compose v2+** installed.
-- Network connectivity to your **NetBox** instance and **Proxmox VE** cluster.
-- *(No local Python dependencies required on the host machine!)*
-
-### Step 1: Clone the Repository
 ```bash
+# 1. Clone the repository
 git clone https://github.com/npu-ee/npu-orchestrator.git
 cd npu-orchestrator
-```
 
-### Step 2: Configure Secrets & Topology
-```bash
-# Generate your secrets configuration
+# 2. Copy the environment template & fill in your NetBox + Proxmox credentials
 cp .env.example .env
 nano .env
-```
-Fill in your credentials:
-```ini
-NETBOX_URL=https://netbox.example.com
-NETBOX_TOKEN=your_netbox_api_token
-PROXMOX_HOST=192.168.1.100
-PROXMOX_USER=root@pam
-PROXMOX_TOKEN_NAME=automation
-PROXMOX_TOKEN_VALUE=your_pve_token_secret
-API_KEY=choose_a_strong_orchestrator_api_key
-```
 
-### Step 3: Run the Unified Installer
-```bash
+# 3. Run the automated installer
 chmod +x install.sh
 ./install.sh
 ```
 
-The unified installer executes a strict, logical **5-step pre-flight deployment**:
-
-```text
-┌────────────────────────────────────────────────────────────────────┐
-│              NPU Infrastructure Orchestrator Installer             │
-└────────────────────────────────────────────────────────────────────┘
-
- [1/5] Prerequisites & Environment
-       ✔ Docker runtime detected
-       ✔ Environment (.env) and topology (config.yml) loaded
-
- [2/5] Container Image Compilation
-       ✔ Orchestrator container image compiled & ready
-
- [3/5] Connectivity & Credential Pre-Flight
-       ✔ Credentials & Security: NetBox Token, Proxmox Token, Webhook Secret
-       ✔ NetBox Topology: Site: 'Default Site', Cluster: 'Default PVE Cluster', Tenant: 'Primary Tenant'
-       ✔ Hypervisor: Connected to Proxmox VE 9.2.4-9.2 on 192.168.1.100:8006 (Storage & Bridge online)
-       ✔ All 16/16 diagnostic probes passed (16/16)
-
- [4/5] NetBox Schema Verification
-       ✔ NetBox v4.6.9 connected (https://netbox.example.com)
-       ✔ 13 Custom Fields verified
-       ✔ Virtual Machine & LXC Container roles verified
-       ✔ Webhook & 1-Click deploy blueprints active
-
- [5/5] Production Launch
-       ✔ Production container started
-       ✔ Live health probe confirmed (HTTP 200 OK from /health)
-
-──────────────────────────────────────────────────────────────────────
-  🎉 Orchestrator is running and ready!
-
-  • Health Probe:    http://127.0.0.1:8090/health
-  • API Docs:        http://127.0.0.1:8090/docs
-  • Full 16-pt Test: ./check-config.sh
-──────────────────────────────────────────────────────────────────────
-```
+The installer builds the container, verifies network connectivity, auto-configures NetBox (custom fields, roles, tags, webhooks), and starts the orchestrator on port `8090`.
 
 ---
 
-## 🔍 Live Diagnostics (`check-config.sh`)
+## 📋 Initial Configuration Guide
 
-At any time, run the standalone diagnostics engine to audit your entire infrastructure pipeline:
+Only two systems are required: **NetBox** and **Proxmox VE**. All other features (*DNS, Uptime Kuma, Traefik, Telemetry, Signal*) are optional modules that are completely skipped if disabled.
+
+### Step 1: Create a Proxmox VE API Token
+
+1. In Proxmox VE web GUI, go to: **Datacenter ➔ Permissions ➔ API Tokens ➔ Add**.
+2. **User**: `root@pam` (or an administrative user).
+3. **Token ID**: `orchestrator`
+4. **Privilege Separation**: **Uncheck** this box (so the token inherits user permissions).
+5. Click **Add** and copy the **Secret Token Value** (you won't be able to see it again).
+
+### Step 2: Create a NetBox API Token
+
+1. In NetBox web GUI, click your profile icon (top right) ➔ **API Tokens ➔ Add Token**.
+2. **Description**: `NPU Orchestrator`
+3. **Key**: Leave blank to auto-generate.
+4. Set **Write enabled** (Checked).
+5. Click **Create** and copy the generated token string.
+
+### Step 3: Populate `.env`
+
+Edit `.env` and fill in the required core credentials:
+
+```ini
+# NetBox (Source of Truth)
+NETBOX_URL=https://netbox.example.com
+NETBOX_TOKEN=your_netbox_api_token_here
+
+# Proxmox VE Cluster
+PROXMOX_HOST=192.168.1.100
+PROXMOX_PORT=8006
+PROXMOX_USER=root@pam
+PROXMOX_TOKEN_NAME=orchestrator
+PROXMOX_TOKEN_VALUE=your-proxmox-token-secret-uuid
+PROXMOX_VERIFY_SSL=false
+
+# Security (Random 32+ character strings)
+API_KEY=choose_a_strong_api_key_for_orchestrator
+NETBOX_WEBHOOK_SECRET=choose_a_random_webhook_secret_hex
+```
+
+> [!TIP]
+> Generate secure secrets easily using: `openssl rand -hex 24`
+
+### Step 4: Run `./install.sh`
+
+Execute the automated installer:
+```bash
+./install.sh
+```
+
+The installer performs a 6-step setup:
+1. **Prerequisites**: Checks Docker and Compose v2 runtime.
+2. **Image Compilation**: Compiles the lightweight Python 3.12 Docker image.
+3. **Pre-Flight Diagnostics**: Verifies API tokens and reachability to Proxmox and NetBox.
+4. **Proxmox Resource Audit**: Queries hypervisor nodes, storage pools, bridges, and OS templates.
+5. **NetBox Zero-Touch Auto-Setup**: Creates all 15 required custom fields, VM/LXC roles, infrastructure tags, and binds the provisioning webhook automatically.
+6. **Production Launch**: Starts the container and verifies `GET /health` responds HTTP 200 within ~2ms.
+
+---
+
+## 🔍 Verification & Health Checking
+
+At any time, run the standalone verification suite:
 
 ```bash
 ./check-config.sh
 ```
 
-Performs **16 live verification probes**:
-- NetBox & Proxmox authentication tokens
-- Default Tenant, Site, Cluster, and Role IDs
-- Proxmox node reachability, storage pools, and network bridges
-- NetBox DNS plugin zone availability
-- Webhook endpoints and HMAC secret validation
+This runs a 3-part diagnostic audit:
+- **Pre-Flight Report**: Tests all credentials, API keys, and service endpoints. Unconfigured optional modules are cleanly marked `[⏩ SKIP]`.
+- **Proxmox Hypervisor Audit**: Verifies hypervisor nodes, storage pool capacity, network bridges, and OS templates.
+- **NetBox Schema Audit**: Confirms all custom fields, roles, tags, and webhooks are active and up-to-date.
+
+You can also check the live health endpoint directly:
+```bash
+curl http://127.0.0.1:8090/health
+```
 
 ---
 
-## 🖥️ How to Deploy Machines via NetBox
+## 🎮 How to Provision Machines via NetBox
 
-### 1. Define your Hardware Flavors (Once)
-In NetBox, navigate to: **Virtualization ➔ VM Types ➔ Add VM Type**:
-- **Name**: `Small` | **vCPUs**: `2` | **RAM**: `2048 MB` | **Disk**: `20 GB`
-- **Name**: `Medium` | **vCPUs**: `2` | **RAM**: `4096 MB` | **Disk**: `40 GB`
-- **Name**: `Large` | **vCPUs**: `4` | **RAM**: `8192 MB` | **Disk**: `80 GB`
+Once installed, deploying machines requires **zero Proxmox GUI access**.
 
-### 2. Deploy a Virtual Machine
-Navigate to: **Virtualization ➔ Virtual Machines ➔ Add**:
-1. **Name**: `web-01`
-2. **Platform**: Select any template synced from Proxmox (e.g. `Ubuntu 24.04 LTS (Noble) (VMID: 9024)`)
-3. **VM Type**: Select your desired flavor (e.g. `Medium`)
-4. **Primary IPv4**: Enter static IP (e.g. `192.168.1.45/24`) or let DHCP assign.
+```
+┌────────────────────────────────────────────────────────┐
+│               NetBox: Add Virtual Machine              │
+│                                                        │
+│  1. Name:       web-node-01                            │
+│  2. Platform:   Ubuntu 24.04 LTS (Noble) (VMID: 9024)  │
+│  3. VM Type:    Medium (2 vCPU / 4 GB RAM / 40 GB Disk)│
+│  4. Primary IP: 192.168.1.50/24                        │
+│                                                        │
+│  [ Save ] ➔ Webhook triggers orchestrator              │
+└───────────────────────────┬────────────────────────────┘
+                            │
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│           NPU Orchestrator (Automated ~45s)            │
+│                                                        │
+│  ✔ Clones Proxmox template (VMID 9024)                 │
+│  ✔ Sets CPU cores, RAM, and expands root disk          │
+│  ✔ Configures Cloud-Init (IP, Gateway, SSH keys)       │
+│  ✔ Registers DNS 'A' and 'PTR' records in NetBox DNS   │
+│  ✔ Boots VM & updates status to 'Active' in NetBox     │
+│  ✔ Auto-registers ICMP ping monitor in Uptime Kuma     │
+└────────────────────────────────────────────────────────┘
+```
+
+### 1. Define Sizing Flavors in NetBox (Once)
+In NetBox, go to: **Virtualization ➔ VM Types ➔ Add VM Type**:
+- **Small**: `1 vCPU`, `2048 MB RAM`, `20 GB Disk`
+- **Medium**: `2 vCPU`, `4096 MB RAM`, `40 GB Disk`
+- **Large**: `4 vCPU`, `8192 MB RAM`, `80 GB Disk`
+
+### 2. Deploy a VM
+In NetBox, go to: **Virtualization ➔ Virtual Machines ➔ Add**:
+1. **Name**: `db-node-01`
+2. **Platform**: Select any template synced from Proxmox (e.g. `Ubuntu 24.04 LTS [9024]`).
+3. **VM Type**: Select your desired flavor (e.g. `Medium`).
+4. **IPv4 Address**: Enter a static IP or leave blank for DHCP.
 5. Click **Save**.
 
-The webhook triggers instantly. The orchestrator:
-- Clones the target Proxmox template.
-- Sets CPU cores, RAM, and expands root disk to match your VM Type.
-- Configures Cloud-Init with network IP, gateway, and SSH keys.
-- Creates DNS `A` and `PTR` records.
-- Powers on the machine.
+### 3. Lifecycle Management
+- **Power On / Off**: Change NetBox status to `Active` (starts VM) or `Offline` (shuts down VM).
+- **Live Hardware Resize**: Adjust vCPU or Memory sliders in NetBox; orchestrator updates Proxmox on next restart.
+- **Decommission**: Change status to `Decommissioning` to quarantine/power off, or delete in NetBox to purge Proxmox disks.
 
 ---
 
-## ⚙️ Configuration Files
+## 🧩 Optional Pluggable Modules
 
-### `config.yml`
-Controls cluster defaults, hardware fallbacks, and integration services. Comments and indentation are preserved automatically:
+NPU Orchestrator features a pluggable module system. **If a module is not configured or disabled, the orchestrator skips loading it entirely** with zero CPU or network overhead.
+
+| Module | What It Does | How to Enable |
+| :--- | :--- | :--- |
+| **NetBox DNS** | Auto-creates forward `A` and reverse `PTR` records when VMs are created. | Set `dns.default_zone: "your.domain"` in `config.yml`. |
+| **Uptime Kuma** | Auto-provisions ICMP ping monitors grouped by NetBox Site. | Add `UPTIME_KUMA_URL`, user, and password in `.env`. |
+| **Traefik Ingress** | Scans Traefik reverse proxies and documents web services in NetBox. | Configure instance list under `traefik:` in `config.yml`. |
+| **Telemetry Sync** | Queries Proxmox 24h RRD counters (CPU, RAM, Disk, Uptime) into NetBox custom fields. | Enabled by default (`telemetry.enabled: true` in `config.yml`). |
+| **Template Sync** | Discovers Proxmox VM & LXC templates and registers them as NetBox Platforms. | Enabled by default (`templates.enabled: true` in `config.yml`). |
+| **Signal Alerting** | Sends instant push alerts on VM creation, resize, or decommission. | Set `SIGNAL_ENABLED=true` and `SIGNAL_API_URL` in `.env`. |
+
+---
+
+## ⚙️ Configuration Reference
+
+### `config.yml` (Topology & Settings)
 
 ```yaml
 version: "1.0"
 
-# ── Infrastructure Defaults ───────────────────────────────────────────────────
+# ── Infrastructure Defaults ─────────────────────────────────────────
+# Automatically populated by ./install.sh
 defaults:
   tenant_id: 1            # NetBox Tenant ID
   site_id: 2              # NetBox Site ID
-  cluster_id: 2           # NetBox Virtualization Cluster ID
+  cluster_id: 2           # NetBox Cluster ID
   role_vm_id: 16          # Role ID for KVM Virtual Machines
   role_lxc_id: 15         # Role ID for LXC Containers
   storage: "zfs-storage"  # Proxmox storage pool name
-  bridge: "vmbr0"         # Proxmox network bridge
+  bridge: "vmbr0"         # Proxmox network bridge name
 
-# ── Hardware Fallbacks ────────────────────────────────────────────────────────
-# Emergency fallbacks used only if a VM is created without a VM Type or sliders.
+# ── Fallback Sizing ─────────────────────────────────────────────────
+# Emergency fallbacks if a VM is created without a VM Type flavor
 fallbacks:
   cores: 2                # Default vCPU cores
-  memory_mb: 2048         # Default RAM in MB (2048 = 2GB)
+  memory_mb: 2048         # Default RAM in MB
   disk_gb: 20             # Default disk size in GB
 
-# ── Proxmox Template Settings ─────────────────────────────────────────────────
+# ── Proxmox Template Auto-Discovery ─────────────────────────────────
 templates:
-  linux_vmid_prefix: "90"           # Linux templates live in VMID range 9000-9099
-  windows_vmid_prefix: "92"         # Windows templates live in VMID range 9200-9299
+  enabled: true
+  sync_interval_minutes: 60
+  linux_vmid_prefix: "90"     # Linux templates live in VMID 9000-9099
+  windows_vmid_prefix: "92"   # Windows templates live in VMID 9200-9299
   default_windows_password: "P@ssw0rdInitial!"
 
-# ── Traefik Ingress Synchronization ───────────────────────────────────────────
-traefik:
+# ── Optional: Uptime Kuma Ping Monitoring ───────────────────────────
+uptime_kuma:
   enabled: true
-  sync_interval_minutes: 15
-  instances:
-    - name: "traefik-main"
-      netbox_vm_id: 7
-      type: "docker"
-      path: "/cloud/traefik"
-    - name: "traefik-api"
-      netbox_vm_id: 6
-      type: "api"
-      url: "http://192.168.1.50:8080"
+  sync_interval_minutes: 30
+  exclude_tags:
+    - "no-monitor"
 
-# ── DNS Automation (NetBox DNS Plugin) ────────────────────────────────────────
+# ── Optional: DNS Auto-Registration (NetBox DNS Plugin) ─────────────
 dns:
-  default_zone: "homelab.local"         # Internal DNS domain in NetBox DNS
-  auto_register_a: true             # Auto-create forward 'A' records (hostname -> IP)
-  auto_register_ptr: true           # Auto-create reverse 'PTR' records (IP -> hostname)
+  default_zone: "homelab.local"
+  auto_register_a: true
+  auto_register_ptr: true
 ```
 
 ---
 
-## 📡 REST API Reference
+## 📡 REST API & Monitoring
 
 Interactive OpenAPI documentation is live at `http://<your-server-ip>:8090/docs`.
 
-| Method | Path | Description | Auth Required |
-| :---: | :--- | :--- | :---: |
-| `POST` | `/api/v1/webhooks/netbox` | Handles real-time NetBox lifecycle events | HMAC Signature |
-| `POST` | `/api/v1/sync/platforms` | Discovers Proxmox templates & reconciles NetBox Platforms | `X-API-Key` |
-| `POST` | `/api/v1/sync/metrics` | Pulls live CPU/RAM/Disk metrics from Proxmox into NetBox | `X-API-Key` |
-| `POST` | `/api/v1/sync/traefik` | Synchronizes Traefik ingress routes to NetBox services | `X-API-Key` |
-| `GET` | `/api/v1/system/preflight` | Executes full 16-point infrastructure diagnostic suite | `X-API-Key` |
-| `GET` | `/api/v1/jobs` | Lists historical provisioning & background task jobs | `X-API-Key` |
-| `GET` | `/api/v1/jobs/{job_id}` | Streams real-time terminal execution logs for a job | `X-API-Key` |
-| `GET` | `/health` | Live HTTP probe for container health monitoring | *None* |
+| Method | Endpoint | Description |
+| :---: | :--- | :--- |
+| `GET` | `/health` | Instant (~2ms) diagnostic status of Core and all optional modules |
+| `POST` | `/api/v1/webhooks/netbox` | Handles real-time NetBox webhook events (HMAC-authenticated) |
+| `GET` | `/api/v1/jobs` | Historical provisioning jobs, status, and execution logs |
+| `GET` | `/api/v1/jobs/{job_id}` | Real-time execution logs for a specific provisioning task |
+| `POST` | `/api/v1/jobs/prune` | Manually prunes old historical jobs older than retention threshold |
+| `POST` | `/api/v1/sync/platforms` | Discovers Proxmox templates & reconciles NetBox Platforms |
+| `POST` | `/api/v1/sync/metrics` | Pulls live CPU/RAM/Disk metrics from Proxmox into NetBox |
+| `POST` | `/api/v1/sync/traefik` | Synchronizes Traefik ingress routes to NetBox services |
+| `POST` | `/api/v1/sync/uptime-kuma` | Synchronizes NetBox devices to Uptime Kuma monitors |
 
 ---
 
-## 📁 Repository Structure
+## ❓ Troubleshooting & FAQ
 
-```text
-npu-orchestrator/
-├── app/
-│   ├── api/v1/              # REST API route handlers (Webhooks, Sync, Jobs)
-│   ├── core/                # Configuration, pre-flight engine, HMAC security
-│   ├── drivers/
-│   │   ├── proxmox.py       # Proxmoxer REST client (KVM, Cloud-Init, Telemetry)
-│   │   ├── netbox.py        # NetBox REST client with HTTP keep-alive pooling
-│   │   ├── template_sync.py # Proxmox ➔ NetBox Platform Sync & Lifecycle Engine
-│   │   ├── traefik_sync.py  # Traefik Docker/API route sync
-│   │   └── notifier.py      # Signal messenger notification provider
-│   ├── scripts/
-│   │   └── bootstrap_netbox.py # Schema sanity audit & custom fields synchronizer
-│   ├── storage/
-│   │   └── db.py            # SQLite WAL database & job execution logger
-│   ├── workers/             # Domain worker engine
-│   │   ├── dispatcher.py    # NetBox webhook parsing, event diffing & locks
-│   │   ├── provisioning.py  # Linux, Windows & LXC creation pipelines
-│   │   ├── lifecycle.py     # Power, live hardware resizing, rename, decommission
-│   │   ├── queue.py         # Python 3.12 task shield & job dispatcher
-│   │   └── tasks.py         # Backward-compatible re-export façade
-│   └── main.py              # Application lifecycle & background reconciler loop
-├── config.yml               # Local topology & hardware fallbacks (git-ignored)
-├── config.example.yml       # Pristine commented configuration template
-├── .env                     # Secrets & tokens (git-ignored)
-├── .env.example             # Secrets template
-├── docker-compose.yml       # Production container deployment definition
-├── Dockerfile               # Multi-stage secure container build
-├── install.sh               # 5-step unified installer & health probe
-└── check-config.sh          # 16-point live diagnostics CLI
-```
+<details>
+<summary><b>1. Proxmox SSL certificate errors ("certificate verify failed")</b></summary>
+<br>
+If your Proxmox server uses a self-signed SSL certificate, ensure <code>PROXMOX_VERIFY_SSL=false</code> is set in <code>.env</code>.
+</details>
 
----
+<details>
+<summary><b>2. How does the orchestrator identify VM templates in Proxmox?</b></summary>
+<br>
+The orchestrator uses deterministic VMID prefixes configured in <code>config.yml</code>:
+<ul>
+  <li><b>Linux Templates</b>: VMIDs <code>9000–9099</code> (e.g. <code>9024</code> for Ubuntu 24.04).</li>
+  <li><b>Windows Templates</b>: VMIDs <code>9200–9299</code> (e.g. <code>9225</code> for Windows Server 2025).</li>
+  <li><b>LXC Containers</b>: Any <code>.tar.zst</code> template in your Proxmox backup/template storage.</li>
+</ul>
+</details>
 
-## 🔒 Security Posture
+<details>
+<summary><b>3. Where are application logs stored?</b></summary>
+<br>
+Container logs can be viewed live via Docker:
+<pre><code>docker compose logs -f orchestrator</code></pre>
+Provisioning task logs are also stored in SQLite (WAL mode) and accessible via the web API at <code>http://&lt;server-ip&gt;:8090/api/v1/jobs</code>.
+</details>
 
-- **HMAC Webhook Verification**: Incoming webhooks from NetBox are checked against `WEBHOOK_SECRET` using SHA-512 signatures.
-- **Non-Root Runtime**: Docker container executes under user `appuser` (UID/GID 10001) with zero elevated host privileges.
-- **Git Safety**: Secrets (`.env`) and topology overrides (`config.yml`) are strictly excluded in `.gitignore` to prevent credential leakage.
+<details>
+<summary><b>4. How to restart or apply configuration changes?</b></summary>
+<br>
+After modifying <code>config.yml</code> or <code>.env</code>, apply changes instantly with:
+<pre><code>docker compose restart orchestrator</code></pre>
+</details>
 
 ---
 
 ## 📄 License
 
-Distributed under the **MIT License**. Free for commercial, homelab, and enterprise use.
+Distributed under the **MIT License**. Free for homelab, commercial, and enterprise use.
 See [LICENSE](LICENSE) for details.

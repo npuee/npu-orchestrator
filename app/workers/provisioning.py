@@ -9,6 +9,7 @@ from app.storage.db import db
 from app.drivers.proxmox import proxmox_driver
 from app.drivers.netbox import netbox_driver
 from app.drivers.notifier import notifier
+from app.core.modules import module_manager
 
 logger = logging.getLogger("orchestrator.workers.provisioning")
 
@@ -95,12 +96,15 @@ async def run_linux_provision_task(
                 interface_name="eth0",
                 domain=dns_zone,
             )
-            await db.append_log(job_id, f"Registering DNS A & PTR records for '{hostname}.{dns_zone}' -> {ip_addr} in NetBox DNS...")
-            await netbox_driver.create_or_update_dns_record(
-                hostname=hostname,
-                ip_address=ip_addr,
-                zone_name=dns_zone,
-            )
+            if module_manager.is_enabled("dns"):
+                await db.append_log(job_id, f"Registering DNS A & PTR records for '{hostname}.{dns_zone}' -> {ip_addr} in NetBox DNS...")
+                await netbox_driver.create_or_update_dns_record(
+                    hostname=hostname,
+                    ip_address=ip_addr,
+                    zone_name=dns_zone,
+                )
+            else:
+                await db.append_log(job_id, "DNS module disabled or unconfigured; skipping DNS record registration.")
             await netbox_driver.update_virtual_machine(
                 vm_id=netbox_vm_id,
                 status="active",
@@ -213,12 +217,15 @@ async def run_windows_provision_task(
                 interface_name="eth0",
                 domain=dns_zone,
             )
-            await db.append_log(job_id, f"Registering DNS A & PTR records for '{hostname}.{dns_zone}' -> {ip_addr} in NetBox DNS...")
-            await netbox_driver.create_or_update_dns_record(
-                hostname=hostname,
-                ip_address=ip_addr,
-                zone_name=dns_zone,
-            )
+            if module_manager.is_enabled("dns"):
+                await db.append_log(job_id, f"Registering DNS A & PTR records for '{hostname}.{dns_zone}' -> {ip_addr} in NetBox DNS...")
+                await netbox_driver.create_or_update_dns_record(
+                    hostname=hostname,
+                    ip_address=ip_addr,
+                    zone_name=dns_zone,
+                )
+            else:
+                await db.append_log(job_id, "DNS module disabled or unconfigured; skipping DNS record registration.")
             await netbox_driver.update_virtual_machine(
                 vm_id=netbox_vm_id,
                 status="active",
@@ -330,12 +337,15 @@ async def run_lxc_provision_task(
                 interface_name="eth0",
                 domain=dns_zone,
             )
-            await db.append_log(job_id, f"Registering DNS A & PTR records for '{hostname}.{dns_zone}' -> {ip_addr} in NetBox DNS...")
-            await netbox_driver.create_or_update_dns_record(
-                hostname=hostname,
-                ip_address=ip_addr,
-                zone_name=dns_zone,
-            )
+            if module_manager.is_enabled("dns"):
+                await db.append_log(job_id, f"Registering DNS A & PTR records for '{hostname}.{dns_zone}' -> {ip_addr} in NetBox DNS...")
+                await netbox_driver.create_or_update_dns_record(
+                    hostname=hostname,
+                    ip_address=ip_addr,
+                    zone_name=dns_zone,
+                )
+            else:
+                await db.append_log(job_id, "DNS module disabled or unconfigured; skipping DNS record registration.")
             await netbox_driver.update_virtual_machine(
                 vm_id=netbox_vm_id,
                 status="active",

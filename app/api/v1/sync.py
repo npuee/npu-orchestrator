@@ -3,6 +3,7 @@ from typing import Optional
 from fastapi import APIRouter, Query, HTTPException, Depends
 from app.core.security import require_api_key
 from app.core.app_config import app_config
+from app.core.modules import module_manager
 from app.drivers.traefik_sync import traefik_sync_driver
 from app.drivers.metrics_sync import metrics_sync_driver
 from app.drivers.template_sync import template_sync_driver
@@ -17,6 +18,9 @@ async def preview_traefik_routes():
     Scans configured Traefik instances from config.yml
     and returns all discovered ingress routes without modifying NetBox.
     """
+    if not module_manager.is_enabled("traefik"):
+        return {"status": "disabled", "message": "Traefik module is disabled or not configured in config.yml"}
+
     try:
         instances = app_config.traefik.get("instances", [])
         results = {}
@@ -48,6 +52,9 @@ async def sync_traefik_routes_to_netbox(
     Synchronizes discovered Traefik routes into NetBox as Application Services.
     If netbox_vm_id is omitted, automatically syncs all instances configured in config.yml.
     """
+    if not module_manager.is_enabled("traefik"):
+        return {"status": "disabled", "message": "Traefik module is disabled or not configured in config.yml"}
+
     try:
         if netbox_vm_id:
             found = None
@@ -56,11 +63,16 @@ async def sync_traefik_routes_to_netbox(
                     found = inst
                     break
             name = found.get("name", f"traefik-vm-{netbox_vm_id}") if found else f"traefik-vm-{netbox_vm_id}"
-            return await traefik_sync_driver.sync_instance(name, netbox_vm_id=netbox_vm_id, instance_conf=found)
+            res = await traefik_sync_driver.sync_instance(name, netbox_vm_id=netbox_vm_id, instance_conf=found)
         else:
-            return await traefik_sync_driver.sync_all_instances()
+            res = await traefik_sync_driver.sync_all_instances()
+
+        instances = [i.get("name") for i in app_config.traefik.get("instances", [])]
+        module_manager.set_module_status("traefik", "connected", {"instances": instances, "summary": res})
+        return res
     except Exception as e:
         logger.exception("Error synchronizing Traefik routes to NetBox: %s", e)
+        module_manager.set_module_status("traefik", "error", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -70,6 +82,9 @@ async def preview_proxmox_metrics():
     Queries Proxmox VE cluster resources and returns live telemetry (CPU %, Memory, Disk, Uptime)
     for all active VMs and LXC Containers without modifying NetBox.
     """
+    if not module_manager.is_enabled("telemetry"):
+        return {"status": "disabled", "message": "Telemetry module is disabled in config.yml"}
+
     try:
         items = metrics_sync_driver.fetch_proxmox_telemetry()
         return {
@@ -87,10 +102,16 @@ async def sync_proxmox_metrics_to_netbox():
     Fetches live CPU, Memory, Disk, and Uptime metrics from Proxmox VE cluster
     and updates NetBox Virtual Machine custom fields and power states.
     """
+    if not module_manager.is_enabled("telemetry"):
+        return {"status": "disabled", "message": "Telemetry module is disabled in config.yml"}
+
     try:
-        return await metrics_sync_driver.sync_metrics_to_netbox()
+        res = await metrics_sync_driver.sync_metrics_to_netbox()
+        module_manager.set_module_status("telemetry", "active", {"updated_vms": res.get("updated_count", 0)})
+        return res
     except Exception as e:
         logger.exception("Error synchronizing Proxmox metrics to NetBox: %s", e)
+        module_manager.set_module_status("telemetry", "error", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -102,6 +123,9 @@ async def preview_ct_templates(
     Scans Proxmox storage pools for LXC System Container templates (vztmpl)
     and returns discovered templates with parsed OS and NetBox blueprint metadata.
     """
+    if not module_manager.is_enabled("templates"):
+        return {"status": "disabled", "message": "Templates module is disabled in config.yml"}
+
     try:
         discovered = template_sync_driver.discover_ct_templates(node)
         return {
@@ -121,10 +145,16 @@ async def sync_platforms_to_netbox(
     Discovers all QEMU VM templates and LXC Container templates on Proxmox,
     creates/updates corresponding Platforms in NetBox, and reconciles/deletes orphaned platforms.
     """
+    if not module_manager.is_enabled("templates"):
+        return {"status": "disabled", "message": "Templates module is disabled in config.yml"}
+
     try:
-        return await template_sync_driver.sync_all_templates(node)
+        res = await template_sync_driver.sync_all_templates(node)
+        module_manager.set_module_status("templates", "active", {"summary": res.get("summary")})
+        return res
     except Exception as e:
         logger.exception("Error synchronizing Proxmox templates to NetBox Platforms: %s", e)
+        module_manager.set_module_status("templates", "error", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -133,9 +163,45 @@ async def sync_ct_templates_to_netbox(
     node: Optional[str] = Query(None, description="Proxmox node name (default: cluster default)"),
 ):
     """Alias for /api/v1/sync/platforms"""
+    return await sync_platforms_to_netbox(node=node)
+
+
+@router.get("/uptime-kuma", summary="Preview NetBox Devices for Uptime Kuma Monitoring")
+async def preview_uptime_kuma_sync():
+    """
+    Scans NetBox DCIM for all physical devices with a Primary IPv4 address
+    and checks their existence status in Uptime Kuma without making modifications.
+    """
+    if not module_manager.is_enabled("uptime_kuma"):
+        return {"status": "disabled", "message": "Uptime Kuma module is disabled in config.yml or missing credentials in .env"}
+
     try:
-        return await template_sync_driver.sync_all_templates(node)
+        from app.scripts.sync_kuma_inventory import preview_sync
+        return await preview_sync()
     except Exception as e:
-        logger.exception("Error synchronizing Proxmox templates: %s", e)
+        logger.exception("Error previewing Uptime Kuma sync: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@router.post("/uptime-kuma", summary="Synchronize NetBox Static Inventory to Uptime Kuma")
+async def sync_netbox_to_uptime_kuma():
+    """
+    Scans NetBox DCIM for all physical devices with a Primary IPv4 address
+    and auto-provisions or reconciles ICMP Ping monitors in Uptime Kuma under Site groups.
+    """
+    if not module_manager.is_enabled("uptime_kuma"):
+        return {"status": "disabled", "message": "Uptime Kuma module is disabled in config.yml or missing credentials in .env"}
+
+    try:
+        from app.scripts.sync_kuma_inventory import run_sync
+        res = await run_sync()
+        from app.core.config import settings
+        module_manager.set_module_status("uptime_kuma", "connected", {
+            "monitored_devices": res.get("total_monitored", 0),
+            "url": settings.UPTIME_KUMA_URL,
+        })
+        return res
+    except Exception as e:
+        logger.exception("Error synchronizing NetBox to Uptime Kuma: %s", e)
+        module_manager.set_module_status("uptime_kuma", "error", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))

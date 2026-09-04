@@ -7,12 +7,16 @@ set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 cd "$DIR"
 
-echo "Running NPU Orchestrator Pre-Flight Verification..."
+echo "Running NPU Orchestrator Verification Suite..."
 
 if docker ps --format '{{.Names}}' | grep -q "^npu-orchestrator$"; then
-    # Container is running: run diagnostics inside the running container
-    docker exec -i npu-orchestrator python3 -m app.core.preflight
+    # Container is running: execute diagnostics inside active container
+    docker exec npu-orchestrator python3 -m app.core.preflight
+    docker exec npu-orchestrator python3 -m app.scripts.audit_proxmox
+    docker exec npu-orchestrator python3 -m app.scripts.bootstrap_netbox --check
 else
-    # Container is not running: run in a temporary disposable container and auto-remove (--rm)
+    # Container is not running: execute in a temporary disposable container (--rm)
     docker compose run --rm orchestrator python3 -m app.core.preflight
+    docker compose run --rm orchestrator python3 -m app.scripts.audit_proxmox
+    docker compose run --rm orchestrator python3 -m app.scripts.bootstrap_netbox --check
 fi

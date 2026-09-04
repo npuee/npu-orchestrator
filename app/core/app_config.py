@@ -23,6 +23,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "disk_gb": 20,
     },
     "templates": {
+        "enabled": True,
+        "sync_interval_minutes": 60,
         "linux_vmid_prefix": "90",
         "windows_vmid_prefix": "92",
         "default_windows_password": "P@ssw0rdInitial!",
@@ -46,10 +48,30 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             },
         ],
     },
+    "telemetry": {
+        "enabled": True,
+        "sync_interval_minutes": 15,
+    },
     "dns": {
         "default_zone": "homelab.local",
         "auto_register_a": True,
         "auto_register_ptr": True,
+    },
+    "uptime_kuma": {
+        "enabled": True,
+        "public_url": "https://kuma.npu.ee",
+        "sync_interval_minutes": 30,
+        "sync_on_startup": True,
+        "enable_default_notifications": True,
+        "exclude_tags": ["no-monitor"],
+        "group_by_site": True,
+        "ping_interval": 60,
+        "ping_retry_interval": 60,
+        "max_retries": 3,
+    },
+    "database": {
+        "retention_days": 30,
+        "prune_interval_hours": 24,
     },
 }
 
@@ -111,8 +133,20 @@ class AppConfig:
         return self._data.get("traefik", DEFAULT_CONFIG["traefik"])
 
     @property
+    def telemetry(self) -> Dict[str, Any]:
+        return self._data.get("telemetry", DEFAULT_CONFIG["telemetry"])
+
+    @property
     def dns(self) -> Dict[str, Any]:
         return self._data.get("dns", DEFAULT_CONFIG["dns"])
+
+    @property
+    def uptime_kuma(self) -> Dict[str, Any]:
+        return self._data.get("uptime_kuma", DEFAULT_CONFIG["uptime_kuma"])
+
+    @property
+    def database(self) -> Dict[str, Any]:
+        return self._data.get("database", DEFAULT_CONFIG["database"])
 
 
 app_config = AppConfig()

@@ -20,30 +20,47 @@ import yaml
 import httpx
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    from app.core.app_config import app_config
+    from app.core.modules import module_manager
+except Exception:
+    app_config = None
+    module_manager = None
+
 # Suppress verbose HTTP request logging from httpx
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("netbox_sanity")
 
 DEFAULT_CUSTOM_FIELDS = [
-    {"name": "proxmox_vmid", "label": "Proxmox VMID", "type": "integer", "object_types": ["virtualization.virtualmachine"], "description": "Allocated Proxmox VMID"},
-    {"name": "proxmox_node", "label": "Proxmox Node", "type": "text", "object_types": ["virtualization.virtualmachine"], "description": "Target Proxmox hypervisor node"},
-    {"name": "cpu_usage", "label": "CPU Usage (24h Avg & Peak)", "type": "text", "object_types": ["virtualization.virtualmachine"], "description": "24h average and peak CPU usage"},
-    {"name": "memory_usage", "label": "Memory Usage", "type": "text", "object_types": ["virtualization.virtualmachine"], "description": "Average RAM usage vs allocation"},
-    {"name": "disk_usage", "label": "Disk Usage", "type": "text", "object_types": ["virtualization.virtualmachine"], "description": "Disk storage utilization"},
-    {"name": "uptime", "label": "Uptime", "type": "text", "object_types": ["virtualization.virtualmachine"], "description": "Continuous runtime"},
-    {"name": "guest_agent", "label": "Guest Agent", "type": "text", "object_types": ["virtualization.virtualmachine"], "description": "QEMU guest agent status"},
-    {"name": "metrics_updated", "label": "Metrics Updated", "type": "text", "object_types": ["virtualization.virtualmachine"], "description": "Timestamp of last telemetry synchronization"},
-    {"name": "fqdn", "label": "FQDN", "type": "text", "object_types": ["ipam.service"], "description": "Ingress domain name(s)"},
-    {"name": "public_url", "label": "Public URL", "type": "url", "object_types": ["ipam.service"], "description": "Clickable public HTTPS URL"},
-    {"name": "sso_protected", "label": "SSO Protected", "type": "boolean", "object_types": ["ipam.service"], "description": "Protected by SSO middleware"},
-    {"name": "ip_whitelist", "label": "IP Whitelist", "type": "boolean", "object_types": ["ipam.service"], "description": "Restricted by IP whitelist"},
-    {"name": "middlewares", "label": "Middlewares", "type": "text", "object_types": ["ipam.service"], "description": "Applied Traefik middlewares"},
+    {"name": "proxmox_vmid", "label": "Proxmox VMID", "type": "integer", "object_types": ["virtualization.virtualmachine"], "description": "Proxmox cluster VMID assigned by Automation Server"},
+    {"name": "proxmox_node", "label": "Proxmox Node", "type": "text", "object_types": ["virtualization.virtualmachine"], "description": "Proxmox VE host node hosting this VM / Container"},
+    {"name": "cpu_usage", "label": "CPU Usage", "type": "text", "object_types": ["virtualization.virtualmachine"], "description": "24-Hour average CPU core utilization and peak workload (from Proxmox RRD)"},
+    {"name": "memory_usage", "label": "Memory Usage", "type": "text", "object_types": ["virtualization.virtualmachine"], "description": "24-Hour average RAM utilization vs total allocated memory (from Proxmox RRD)"},
+    {"name": "disk_usage", "label": "Disk Usage", "type": "text", "object_types": ["virtualization.virtualmachine"], "description": "Root disk capacity and space utilization"},
+    {"name": "uptime", "label": "Uptime", "type": "text", "object_types": ["virtualization.virtualmachine"], "description": "Elapsed uptime since last start or reboot"},
+    {"name": "guest_agent", "label": "Guest Agent", "type": "text", "object_types": ["virtualization.virtualmachine"], "description": "Live QEMU Guest Agent status from Proxmox VE"},
+    {"name": "metrics_updated", "label": "Metrics Last Synced", "type": "text", "object_types": ["virtualization.virtualmachine"], "description": "Timestamp when 24-hour telemetry was last synchronized"},
+    {"name": "requested_ip", "label": "IP Address (Optional)", "type": "text", "object_types": ["virtualization.virtualmachine"], "description": "Optional static IPv4 address. If left blank, next IP is auto-allocated."},
+    {"name": "fqdn", "label": "FQDN / Domain", "type": "text", "object_types": ["ipam.service"], "description": "Fully Qualified Domain Name or hostname (e.g. media.npu.ee)"},
+    {"name": "public_url", "label": "Public URL", "type": "url", "object_types": ["ipam.service"], "description": "Full Public HTTPS/HTTP URL (e.g. https://media.npu.ee)"},
+    {"name": "sso_protected", "label": "SSO Protected", "type": "boolean", "object_types": ["ipam.service"], "description": "Protected by Azure AD SSO ForwardAuth (npu-sso)"},
+    {"name": "ip_whitelist", "label": "NPU Whitelist", "type": "boolean", "object_types": ["ipam.service"], "description": "Restricted to NPU IP Whitelist (npu-ip-whitelist)"},
+    {"name": "middlewares", "label": "Middlewares", "type": "text", "object_types": ["ipam.service"], "description": "Active Traefik Middleware Chain"},
+    {"name": "kuma_monitor_id", "label": "Uptime Kuma ID", "type": "integer", "object_types": ["dcim.device", "virtualization.virtualmachine"], "description": "Monitor ID in Uptime Kuma"},
 ]
 
 DEFAULT_ROLES = [
     {"name": "Virtual Machine", "slug": "virtual-machine", "color": "9c27b0", "description": "Standard virtual machine workload"},
     {"name": "LXC Container", "slug": "lxc-container", "color": "009688", "description": "LXC system container workload"},
+]
+
+DEFAULT_TAGS = [
+    {"name": "SSO", "slug": "sso", "color": "9c27b0", "description": "Protected by Azure AD SSO ForwardAuth"},
+    {"name": "NPU Whitelist", "slug": "npu-whitelist", "color": "ff9800", "description": "Restricted to NPU IP Whitelist"},
+    {"name": "Public Ingress", "slug": "public-ingress", "color": "4caf50", "description": "Publicly accessible via Traefik ingress"},
+    {"name": "No Monitor", "slug": "no-monitor", "color": "9e9e9e", "description": "Excluded from automated Uptime Kuma ping monitoring"},
+    {"name": "Decommissioned", "slug": "decommissioned", "color": "607d8b", "description": "Workload safely decommissioned, isolated, and powered off"},
 ]
 
 
@@ -75,7 +92,7 @@ class NetBoxSanityChecker:
         """Audits NetBox schema against requirements and applies missing items if needed."""
         if not summary_mode:
             print("\n======================================================================")
-            print("                  NETBOX SCHEMA SANITY AUDIT")
+            print("               NETBOX SCHEMA & CONFIGURATION AUDIT")
             print("======================================================================")
 
         async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
@@ -86,12 +103,45 @@ class NetBoxSanityChecker:
                 sys.exit(1)
 
             version = status_resp.json().get("netbox-version", "unknown")
+            rq_workers = status_resp.json().get("rq-workers-running", 0)
             if not summary_mode:
                 print(f"Connected to NetBox v{version} at {self.url}\n")
+                if rq_workers > 0:
+                    print(f"[✔ OK] Webhook Worker (RQ)    : Active ({rq_workers} worker online - dispatches event webhooks)")
+                else:
+                    print(f"[⚠️ WARN] Webhook Worker (RQ)  : No RQ workers online (NetBox cannot dispatch provisioning webhooks)")
             else:
                 print(f"{indent}\033[92m✔\033[0m NetBox v{version} connected ({self.url})")
 
-            # 2. Audit Custom Fields
+            # 2. Audit NetBox DNS Plugin & Default Zone
+            dns_enabled = module_manager.is_enabled("dns") if module_manager else (app_config.dns.get("auto_register_a", True) if app_config else True)
+            zone_name = app_config.dns.get("default_zone", "npu.house") if app_config else "npu.house"
+            has_dns_plugin = False
+            has_dns_zone = False
+            if not dns_enabled:
+                if not summary_mode:
+                    print(f"[⏩ SKIP] NetBox DNS Plugin      : Skipped (module disabled in config.yml)")
+            else:
+                try:
+                    plugin_resp = await client.get(f"{self.url}/api/plugins/netbox-dns/zones/", headers=self.headers)
+                    if plugin_resp.status_code == 200:
+                        has_dns_plugin = True
+                        z_resp = await client.get(f"{self.url}/api/plugins/netbox-dns/zones/?name={zone_name}", headers=self.headers)
+                        if z_resp.status_code == 200 and z_resp.json().get("results"):
+                            has_dns_zone = True
+                            if not summary_mode:
+                                print(f"[✔ OK] NetBox DNS Plugin      : Active & Responding (Default Zone: '{zone_name}')")
+                        else:
+                            if not summary_mode:
+                                print(f"[⚠️ WARN] NetBox DNS Plugin    : Active, but Zone '{zone_name}' not created yet")
+                    elif plugin_resp.status_code == 404:
+                        if not summary_mode:
+                            print(f"[✖ OUTDATED] NetBox DNS Plugin : 'netbox-dns' plugin not installed (DNS auto-register will fail)")
+                except Exception as e:
+                    if not summary_mode:
+                        print(f"[⚠️ WARN] NetBox DNS Plugin    : Probe skipped ({e})")
+
+            # 3. Audit Custom Fields
             existing_cfs = await self.get_existing_map("extras/custom-fields", "name", client)
             missing_cfs = [cf for cf in DEFAULT_CUSTOM_FIELDS if cf["name"] not in existing_cfs]
 
@@ -102,7 +152,7 @@ class NetBoxSanityChecker:
                     names = ", ".join(f"'{cf['name']}'" for cf in missing_cfs)
                     print(f"[✖ OUTDATED] Custom Fields   : Missing {len(missing_cfs)} field(s) -> {names}")
 
-            # 3. Audit Roles
+            # 4. Audit Roles
             existing_roles = await self.get_existing_map("dcim/device-roles", "slug", client)
             missing_roles = [r for r in DEFAULT_ROLES if r["slug"] not in existing_roles]
             if "virtual-machine" in existing_roles:
@@ -117,7 +167,18 @@ class NetBoxSanityChecker:
                     names = ", ".join(f"'{r['name']}'" for r in missing_roles)
                     print(f"[✖ OUTDATED] Device / VM Roles: Missing {len(missing_roles)} role(s) -> {names}")
 
-            # 4. Audit Cluster Type
+            # 5. Audit Infrastructure Tags
+            existing_tags = await self.get_existing_map("extras/tags", "slug", client)
+            missing_tags = [t for t in DEFAULT_TAGS if t["slug"] not in existing_tags]
+
+            if not summary_mode:
+                if not missing_tags:
+                    print(f"[✔ OK] Infrastructure Tags   : All {len(DEFAULT_TAGS)}/{len(DEFAULT_TAGS)} tags present ({', '.join(t['slug'] for t in DEFAULT_TAGS)})")
+                else:
+                    names = ", ".join(f"'{t['name']}'" for t in missing_tags)
+                    print(f"[✖ OUTDATED] Infrastructure Tags: Missing {len(missing_tags)} tag(s) -> {names}")
+
+            # 6. Audit Cluster Type
             existing_ctypes = await self.get_existing_map("virtualization/cluster-types", "slug", client)
             has_ctype = "proxmox-ve" in existing_ctypes
 
@@ -130,17 +191,62 @@ class NetBoxSanityChecker:
                 if not summary_mode:
                     print("[✖ OUTDATED] Cluster Type     : 'Proxmox VE' type missing")
 
-            # 5. Audit 1-Click Custom Link
+            # 7. Audit Topology Defaults (from config.yml)
+            topo_parts = []
+            topo_missing = []
+            if app_config:
+                defaults = app_config.defaults
+                tenant_id = defaults.get("tenant_id")
+                site_id = defaults.get("site_id")
+                cluster_id = defaults.get("cluster_id")
+
+                if tenant_id:
+                    t_resp = await client.get(f"{self.url}/api/tenancy/tenants/{tenant_id}/", headers=self.headers)
+                    if t_resp.status_code == 200:
+                        topo_parts.append(f"Tenant '{t_resp.json().get('name')}' (ID: {tenant_id})")
+                    else:
+                        topo_missing.append(f"Tenant ID {tenant_id}")
+
+                if site_id:
+                    s_resp = await client.get(f"{self.url}/api/dcim/sites/{site_id}/", headers=self.headers)
+                    if s_resp.status_code == 200:
+                        topo_parts.append(f"Site '{s_resp.json().get('name')}' (ID: {site_id})")
+                    else:
+                        topo_missing.append(f"Site ID {site_id}")
+
+                if cluster_id:
+                    c_resp = await client.get(f"{self.url}/api/virtualization/clusters/{cluster_id}/", headers=self.headers)
+                    if c_resp.status_code == 200:
+                        topo_parts.append(f"Cluster '{c_resp.json().get('name')}' (ID: {cluster_id})")
+                    else:
+                        topo_missing.append(f"Cluster ID {cluster_id}")
+
+                if not summary_mode:
+                    if not topo_missing:
+                        print(f"[✔ OK] Topology Defaults      : {', '.join(topo_parts)}")
+                    else:
+                        print(f"[✖ OUTDATED] Topology Defaults: Missing {', '.join(topo_missing)} in NetBox")
+
+            # 8. Audit Custom Links
             existing_links = await self.get_existing_map("extras/custom-links", "name", client)
             has_link = "Deploy VM Blueprint" in existing_links
+            has_kuma_link = "View in Uptime Kuma" in existing_links
+            kuma_enabled = module_manager.is_enabled("uptime_kuma") if module_manager else True
 
             if not summary_mode:
                 if has_link:
                     print("[✔ OK] 1-Click Deploy Button  : 'Deploy VM Blueprint' active on VM Types")
                 else:
                     print("[✖ OUTDATED] Custom Link      : 'Deploy VM Blueprint' button missing")
+                if kuma_enabled:
+                    if has_kuma_link:
+                        print("[✔ OK] Uptime Kuma Link       : 'View in Uptime Kuma' active on Devices & VMs")
+                    else:
+                        print("[✖ OUTDATED] Uptime Kuma Link : 'View in Uptime Kuma' button missing")
+                else:
+                    print("[⏩ SKIP] Uptime Kuma Link       : Skipped (module disabled or not configured)")
 
-            # 6. Audit Webhook & Event Rule
+            # 9. Audit Webhook & Event Rule
             existing_whs = await self.get_existing_map("extras/webhooks", "name", client)
             has_wh = "Proxmox Orchestrator Webhook" in existing_whs
             wh_id = existing_whs["Proxmox Orchestrator Webhook"]["id"] if has_wh else None
@@ -160,11 +266,12 @@ class NetBoxSanityChecker:
                     print(f"[✖ OUTDATED] Webhook Config   : Missing {' & '.join(missing_wh_parts)}")
 
             # Check if any updates are needed
-            needs_sync = bool(missing_cfs or missing_roles or not has_ctype or not has_link or not has_wh or not has_er)
+            needs_kuma_link = kuma_enabled and not has_kuma_link
+            needs_sync = bool(missing_cfs or missing_roles or missing_tags or not has_ctype or not has_link or needs_kuma_link or not has_wh or not has_er)
 
             if summary_mode:
                 if not missing_cfs:
-                    print(f"{indent}\033[92m✔\033[0m 13 Custom Fields verified")
+                    print(f"{indent}\033[92m✔\033[0m All {len(DEFAULT_CUSTOM_FIELDS)} Custom Fields verified")
                 else:
                     print(f"{indent}\033[93m⚠️\033[0m Custom Fields: {len(missing_cfs)} missing (will auto-create)")
 
@@ -172,6 +279,11 @@ class NetBoxSanityChecker:
                     print(f"{indent}\033[92m✔\033[0m Virtual Machine & LXC Container roles verified")
                 else:
                     print(f"{indent}\033[93m⚠️\033[0m Roles: {len(missing_roles)} missing (will auto-create)")
+
+                if not missing_tags:
+                    print(f"{indent}\033[92m✔\033[0m All {len(DEFAULT_TAGS)} Infrastructure Tags verified")
+                else:
+                    print(f"{indent}\033[93m⚠️\033[0m Tags: {len(missing_tags)} missing (will auto-create)")
 
                 if has_wh and has_link:
                     print(f"{indent}\033[92m✔\033[0m Webhook & 1-Click deploy blueprints active")
@@ -217,6 +329,14 @@ class NetBoxSanityChecker:
                     elif r["slug"] == "lxc-container":
                         self.ids["role_lxc_id"] = new_role["id"]
 
+            # Apply missing tags
+            for t in missing_tags:
+                resp = await client.post(f"{self.url}/api/extras/tags/", headers=self.headers, json=t)
+                if resp.status_code in (200, 201):
+                    print(f"  ✔ Created Tag: {t['name']} (slug: {t['slug']})")
+                else:
+                    print(f"  ✖ Failed to create Tag {t['name']}: {resp.text}")
+
             # Apply missing cluster type
             if not has_ctype:
                 ctype_payload = {"name": "Proxmox VE", "slug": "proxmox-ve", "description": "Proxmox VE Hypervisors"}
@@ -225,7 +345,7 @@ class NetBoxSanityChecker:
                     ctype_id = resp.json().get("id")
                     print(f"  ✔ Created Cluster Type: Proxmox VE (ID: {ctype_id})")
 
-            # Apply missing 1-click button
+            # Apply missing custom links
             if not has_link:
                 link_payload = {
                     "name": "Deploy VM Blueprint",
@@ -238,6 +358,19 @@ class NetBoxSanityChecker:
                 resp = await client.post(f"{self.url}/api/extras/custom-links/", headers=self.headers, json=link_payload)
                 if resp.status_code in (200, 201):
                     print("  ✔ Created Custom Link: Deploy VM Blueprint")
+
+            if kuma_enabled and not has_kuma_link:
+                kuma_link_payload = {
+                    "name": "View in Uptime Kuma",
+                    "object_types": ["dcim.device", "virtualization.virtualmachine"],
+                    "link_text": "{% if object.cf.kuma_monitor_id or object.primary_ip %}📊 Uptime Kuma{% endif %}",
+                    "link_url": "https://kuma.npu.ee/dashboard/{% if object.cf.kuma_monitor_id %}{{ object.cf.kuma_monitor_id }}{% endif %}",
+                    "button_class": "cyan",
+                    "new_window": True,
+                }
+                resp = await client.post(f"{self.url}/api/extras/custom-links/", headers=self.headers, json=kuma_link_payload)
+                if resp.status_code in (200, 201):
+                    print("  ✔ Created Custom Link: View in Uptime Kuma")
 
             # Apply missing webhook & event rule
             if self.webhook_url and not has_wh:
@@ -377,7 +510,7 @@ async def main():
         print("❌ Error: NETBOX_URL and NETBOX_TOKEN must be set in .env")
         sys.exit(1)
 
-    check_only = "--check-only" in sys.argv
+    check_only = "--check-only" in sys.argv or "--check" in sys.argv
     summary_mode = "--summary" in sys.argv
 
     checker = NetBoxSanityChecker(netbox_url, netbox_token, webhook_url, webhook_secret)

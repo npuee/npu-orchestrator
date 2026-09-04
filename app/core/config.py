@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     DEFAULT_DNS_DOMAIN: str = "homelab.local"
     DEFAULT_DNS_SERVER: str = "192.168.1.1"
     DEFAULT_GATEWAY: str = "192.168.1.1"
+    DEFAULT_BRIDGE: str = "vmbr0"
     DEFAULT_SSH_KEY: Optional[str] = None  # Raw public key string (e.g. ssh-ed25519 AAAAC3...)
     DEFAULT_SSH_KEY_FILE: Optional[str] = "/root/scripts/keys/main.pub"
 
@@ -40,6 +41,11 @@ class Settings(BaseSettings):
     SIGNAL_API_URL: Optional[str] = None  # e.g., http://api.example.com/signal/send
     SIGNAL_SENDER: Optional[str] = None
     SIGNAL_RECIPIENTS: List[str] = []
+
+    # Uptime Kuma Settings
+    UPTIME_KUMA_URL: str = "http://172.31.0.1:3001"
+    UPTIME_KUMA_USERNAME: Optional[str] = None
+    UPTIME_KUMA_PASSWORD: Optional[str] = None
 
     # Traefik Sync Settings
     TRAEFIK_SYNC_ENABLED: bool = True

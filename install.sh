@@ -13,7 +13,7 @@ echo "└───────────────────────�
 
 # ── Step 1: Verify Prerequisites & Environment ────────────────────────────────
 echo ""
-echo " [1/5] Prerequisites & Environment"
+echo " [1/6] Prerequisites & Environment"
 
 if ! command -v docker >/dev/null 2>&1; then
     echo "       ✖ Error: Docker is not installed. Please install Docker first."
@@ -54,7 +54,7 @@ echo "       ✔ Environment (.env) and topology (config.yml) loaded"
 
 # ── Step 2: Build Container Image ─────────────────────────────────────────────
 echo ""
-echo " [2/5] Container Image Compilation"
+echo " [2/6] Container Image Compilation"
 mkdir -p data
 if docker compose build -q >/tmp/npu_build.log 2>&1; then
     echo "       ✔ Orchestrator container image compiled & ready"
@@ -66,7 +66,7 @@ fi
 
 # ── Step 3: Pre-Flight Diagnostics (Credentials & Connectivity) ───────────────
 echo ""
-echo " [3/5] Connectivity & Credential Pre-Flight"
+echo " [3/6] Connectivity & Credential Pre-Flight"
 
 if ! docker compose --progress quiet run --rm orchestrator python3 -m app.core.preflight --summary; then
     echo ""
@@ -75,9 +75,19 @@ if ! docker compose --progress quiet run --rm orchestrator python3 -m app.core.p
     exit 1
 fi
 
-# ── Step 4: NetBox Schema Verification ────────────────────────────────────────
+# ── Step 4: Proxmox VE Resource Verification ──────────────────────────────────
 echo ""
-echo " [4/5] NetBox Schema Verification"
+echo " [4/6] Proxmox VE Resource Verification"
+
+if ! docker compose --progress quiet run --rm orchestrator python3 -m app.scripts.audit_proxmox --summary; then
+    echo ""
+    echo "       ✖ Proxmox VE resource verification failed."
+    exit 1
+fi
+
+# ── Step 5: NetBox Schema Verification ────────────────────────────────────────
+echo ""
+echo " [5/6] NetBox Schema Verification"
 
 if ! docker compose --progress quiet run --rm orchestrator python3 -m app.scripts.bootstrap_netbox --summary; then
     echo ""
@@ -85,9 +95,9 @@ if ! docker compose --progress quiet run --rm orchestrator python3 -m app.script
     exit 1
 fi
 
-# ── Step 5: Start Production Container & Verify Health ────────────────────────
+# ── Step 6: Start Production Container & Verify Health ────────────────────────
 echo ""
-echo " [5/5] Production Launch"
+echo " [6/6] Production Launch"
 docker compose --progress quiet up -d --no-build
 echo "       ✔ Production container started"
 

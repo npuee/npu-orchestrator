@@ -38,6 +38,8 @@ fallbacks:
 # ── Proxmox Template Settings ─────────────────────────────────────────────────
 # Controls how the orchestrator selects templates when cloning VMs.
 templates:
+  enabled: true                     # Auto-sync Proxmox templates to NetBox Platforms
+  sync_interval_minutes: 60         # Frequency of template reconciliation in minutes
   linux_vmid_prefix: "90"           # Linux templates live in VMID range 9000-9099
   windows_vmid_prefix: "92"         # Windows templates live in VMID range 9200-9299
   default_windows_password: "P@ssw0rdInitial!"  # Initial Administrator password for Windows VMs
@@ -66,6 +68,13 @@ traefik:
       type: "api"                   # Use "api" for remote instances
       api_url: "http://10.0.0.10:8080"  # Traefik API address
 
+# ── Proxmox Telemetry & Metrics Synchronization ──────────────────────────────
+# Periodically queries Proxmox VE for live CPU, RAM, Disk, and Uptime metrics
+# and updates the corresponding custom fields and power states in NetBox.
+telemetry:
+  enabled: true
+  sync_interval_minutes: 15     # Interval for polling Proxmox telemetry
+
 # ── DNS Management ────────────────────────────────────────────────────────────
 # When a VM is created, the orchestrator can automatically create DNS records
 # in NetBox DNS (requires the netbox-dns plugin to be installed in NetBox).
@@ -75,3 +84,25 @@ dns:
   default_zone: "example.internal"  # Your internal DNS domain (e.g. "home.lab", "company.local", "corp.net")
   auto_register_a: true             # Create forward DNS records (hostname → IP)
   auto_register_ptr: true           # Create reverse DNS records (IP → hostname)
+
+# ── Uptime Kuma Monitoring ───────────────────────────────────────────────────
+# Synchronizes NetBox device inventory with Uptime Kuma, creating ICMP Ping
+# monitors for all physical infrastructure and auto-grouping by Site.
+uptime_kuma:
+  enabled: true
+  public_url: "https://kuma.npu.ee"  # Public dashboard URL used for NetBox 1-click links
+  sync_interval_minutes: 30     # Frequency of NetBox -> Uptime Kuma reconciliation in minutes
+  sync_on_startup: true         # Run reconciliation immediately on container boot
+  enable_default_notifications: true  # Auto-attach Uptime Kuma default notification channels
+  exclude_tags:                 # NetBox tags that exclude devices from monitoring (auto-deleted if tagged)
+    - "no-monitor"
+  group_by_site: true           # Group monitors into Site folders (e.g. Lohusuu, Hulja, Oracle)
+  ping_interval: 60             # Heartbeat check interval in seconds
+  ping_retry_interval: 60       # Retry interval when a check fails
+  max_retries: 3                # Failures before marking monitor DOWN
+
+# ── Database & State Retention ────────────────────────────────────────────────
+# Controls the automatic maintenance of the SQLite jobs and logs history.
+database:
+  retention_days: 30            # Days to retain completed/failed jobs and logs
+  prune_interval_hours: 24      # How often to run historical job pruning (hours)

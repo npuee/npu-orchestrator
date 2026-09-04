@@ -42,13 +42,41 @@ DEFAULT_CUSTOM_FIELDS = [
     {"name": "guest_agent", "label": "Guest Agent", "type": "text", "object_types": ["virtualization.virtualmachine"], "description": "Live QEMU Guest Agent status from Proxmox VE"},
     {"name": "metrics_updated", "label": "Metrics Last Synced", "type": "text", "object_types": ["virtualization.virtualmachine"], "description": "Timestamp when 24-hour telemetry was last synchronized"},
     {"name": "requested_ip", "label": "IP Address (Optional)", "type": "text", "object_types": ["virtualization.virtualmachine"], "description": "Optional static IPv4 address. If left blank, next IP is auto-allocated."},
-    {"name": "fqdn", "label": "FQDN / Domain", "type": "text", "object_types": ["ipam.service"], "description": "Fully Qualified Domain Name or hostname (e.g. media.example.com)"},
-    {"name": "public_url", "label": "Public URL", "type": "url", "object_types": ["ipam.service"], "description": "Full Public HTTPS/HTTP URL (e.g. https://media.example.com)"},
-    {"name": "sso_protected", "label": "SSO Protected", "type": "boolean", "object_types": ["ipam.service"], "description": "Protected by Single Sign-On (SSO / ForwardAuth)"},
-    {"name": "ip_whitelist", "label": "IP Whitelist", "type": "boolean", "object_types": ["ipam.service"], "description": "Restricted to specific IP Whitelist / Allowlist"},
-    {"name": "middlewares", "label": "Middlewares", "type": "text", "object_types": ["ipam.service"], "description": "Active Traefik Middleware Chain"},
     {"name": "kuma_monitor_id", "label": "Uptime Kuma ID", "type": "integer", "object_types": ["dcim.device", "virtualization.virtualmachine"], "description": "Monitor ID in Uptime Kuma"},
 ]
+
+
+def get_required_custom_fields() -> List[Dict[str, Any]]:
+    """
+    Returns all required NetBox custom fields. Dynamically incorporates Application Service
+    (ipam.service) custom fields based on the mappings configured under traefik.custom_fields in config.yml.
+    """
+    fields = list(DEFAULT_CUSTOM_FIELDS)
+    cf_map = (app_config.traefik.get("custom_fields") if app_config else None) or {}
+
+    svc_specs = [
+        ("fqdn", "FQDN / Domain", "text", "Fully Qualified Domain Name or hostname (e.g. media.example.com)"),
+        ("public_url", "Public URL", "url", "Full Public HTTPS/HTTP URL (e.g. https://media.example.com)"),
+        ("sso_protected", "SSO Protected", "boolean", "Protected by Single Sign-On (SSO / ForwardAuth)"),
+        ("ip_whitelist", "IP Whitelist", "boolean", "Restricted to specific IP Whitelist / Allowlist"),
+        ("middlewares", "Middlewares", "text", "Active Traefik Middleware Chain"),
+    ]
+
+    for default_name, default_label, field_type, description in svc_specs:
+        actual_name = cf_map.get(default_name, default_name)
+        if actual_name:
+            label = default_label
+            if actual_name != default_name:
+                label = str(actual_name).replace("-", " ").replace("_", " ").title()
+            fields.append({
+                "name": actual_name,
+                "label": label,
+                "type": field_type,
+                "object_types": ["ipam.service"],
+                "description": description,
+            })
+
+    return fields
 
 DEFAULT_ROLES = [
     {"name": "Virtual Machine", "slug": "virtual-machine", "color": "9c27b0", "description": "Standard virtual machine workload"},
@@ -146,12 +174,13 @@ class NetBoxSanityChecker:
                         print(f"[⚠️ WARN] NetBox DNS Plugin    : Probe skipped ({e})")
 
             # 3. Audit Custom Fields
+            required_cfs = get_required_custom_fields()
             existing_cfs = await self.get_existing_map("extras/custom-fields", "name", client)
-            missing_cfs = [cf for cf in DEFAULT_CUSTOM_FIELDS if cf["name"] not in existing_cfs]
+            missing_cfs = [cf for cf in required_cfs if cf["name"] not in existing_cfs]
 
             if not summary_mode:
                 if not missing_cfs:
-                    print(f"[✔ OK] Custom Fields          : All {len(DEFAULT_CUSTOM_FIELDS)}/{len(DEFAULT_CUSTOM_FIELDS)} required fields present")
+                    print(f"[✔ OK] Custom Fields          : All {len(required_cfs)}/{len(required_cfs)} required fields present")
                 else:
                     names = ", ".join(f"'{cf['name']}'" for cf in missing_cfs)
                     print(f"[✖ OUTDATED] Custom Fields   : Missing {len(missing_cfs)} field(s) -> {names}")
@@ -293,7 +322,7 @@ class NetBoxSanityChecker:
 
             if summary_mode:
                 if not missing_cfs:
-                    print(f"{indent}\033[92m✔\033[0m All {len(DEFAULT_CUSTOM_FIELDS)} Custom Fields verified")
+                    print(f"{indent}\033[92m✔\033[0m All {len(required_cfs)} Custom Fields verified")
                 else:
                     print(f"{indent}\033[93m⚠️\033[0m Custom Fields: {len(missing_cfs)} missing (will auto-create)")
 
@@ -303,7 +332,7 @@ class NetBoxSanityChecker:
                     print(f"{indent}\033[93m⚠️\033[0m Roles: {len(missing_roles)} missing (will auto-create)")
 
                 if not missing_tags:
-                    print(f"{indent}\033[92m✔\033[0m All {len(DEFAULT_TAGS)} Infrastructure Tags verified")
+                    print(f"{indent}\033[92m✔\033[0m All {len(required_tags)} Infrastructure Tags verified")
                 else:
                     print(f"{indent}\033[93m⚠️\033[0m Tags: {len(missing_tags)} missing (will auto-create)")
 

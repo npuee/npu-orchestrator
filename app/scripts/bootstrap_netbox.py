@@ -100,9 +100,13 @@ def get_required_custom_fields() -> List[Dict[str, Any]]:
             if isinstance(mw_data, dict):
                 custom_name = mw_data.get("netbox_field")
                 if custom_name and not any(f["name"] == custom_name for f in fields):
-                    clean = str(custom_name).replace("-", " ").replace("_", " ")
-                    words = [w.upper() if w.lower() in ("waf", "sso", "ip", "url", "dns") else w.title() for w in clean.split()]
-                    label = " ".join(words)
+                    # Use netbox_label if defined, otherwise auto-generate from field name
+                    if mw_data.get("netbox_label"):
+                        label = mw_data["netbox_label"]
+                    else:
+                        clean = str(custom_name).replace("-", " ").replace("_", " ")
+                        words = [w.upper() if w.lower() in ("waf", "sso", "ip", "url", "dns") else w.title() for w in clean.split()]
+                        label = " ".join(words)
                     title_key = mw_key.upper() if mw_key.lower() == "waf" else mw_key.replace("_", " ").title()
                     fields.append({
                         "name": custom_name,
@@ -213,13 +217,22 @@ class NetBoxSanityChecker:
             required_cfs = get_required_custom_fields()
             existing_cfs = await self.get_existing_map("extras/custom-fields", "name", client)
             missing_cfs = [cf for cf in required_cfs if cf["name"] not in existing_cfs]
+            # Fields that exist but have a stale label (label changed in config)
+            stale_cf_labels = [
+                (cf, existing_cfs[cf["name"]]["id"])
+                for cf in required_cfs
+                if cf["name"] in existing_cfs and existing_cfs[cf["name"]].get("label") != cf["label"]
+            ]
 
             if not summary_mode:
-                if not missing_cfs:
+                if not missing_cfs and not stale_cf_labels:
                     print(f"[✔ OK] Custom Fields          : All {len(required_cfs)}/{len(required_cfs)} required fields present")
-                else:
+                elif missing_cfs:
                     names = ", ".join(f"'{cf['name']}'" for cf in missing_cfs)
                     print(f"[✖ OUTDATED] Custom Fields   : Missing {len(missing_cfs)} field(s) -> {names}")
+                if stale_cf_labels:
+                    stale_names = ", ".join(f"'{cf['name']}'" for cf, _ in stale_cf_labels)
+                    print(f"[✖ OUTDATED] Custom Fields   : Label mismatch on {len(stale_cf_labels)} field(s) -> {stale_names}")
 
             # 4. Audit Roles
             existing_roles = await self.get_existing_map("dcim/device-roles", "slug", client)
@@ -374,13 +387,15 @@ class NetBoxSanityChecker:
 
             # Check if any updates are needed
             needs_kuma_link = kuma_enabled and not has_kuma_link
-            needs_sync = bool(missing_cfs or missing_roles or missing_tags or not has_ctype or not has_link or needs_kuma_link or not has_wh or not has_er or missing_lxc_types)
+            needs_sync = bool(missing_cfs or stale_cf_labels or missing_roles or missing_tags or not has_ctype or not has_link or needs_kuma_link or not has_wh or not has_er or missing_lxc_types)
 
             if summary_mode:
-                if not missing_cfs:
+                if not missing_cfs and not stale_cf_labels:
                     print(f"{indent}\033[92m✔\033[0m All {len(required_cfs)} Custom Fields verified")
-                else:
+                elif missing_cfs:
                     print(f"{indent}\033[93m⚠️\033[0m Custom Fields: {len(missing_cfs)} missing (will auto-create)")
+                if stale_cf_labels:
+                    print(f"{indent}\033[93m⚠️\033[0m Custom Fields: {len(stale_cf_labels)} label(s) outdated (will update)")
 
                 if not missing_roles:
                     print(f"{indent}\033[92m✔\033[0m Virtual Machine & LXC Container roles verified")
@@ -421,9 +436,21 @@ class NetBoxSanityChecker:
             for cf in missing_cfs:
                 resp = await client.post(f"{self.url}/api/extras/custom-fields/", headers=self.headers, json=cf)
                 if resp.status_code in (200, 201):
-                    print(f"  ✔ Created Custom Field: {cf['name']}")
+                    print(f"  ✔ Created Custom Field: {cf['name']} (label: '{cf['label']}')")
                 else:
                     print(f"  ✖ Failed to create Custom Field {cf['name']}: {resp.text}")
+
+            # Update stale labels on existing custom fields
+            for cf, cf_id in stale_cf_labels:
+                resp = await client.patch(
+                    f"{self.url}/api/extras/custom-fields/{cf_id}/",
+                    headers=self.headers,
+                    json={"label": cf["label"]},
+                )
+                if resp.status_code in (200, 201):
+                    print(f"  ✔ Updated Custom Field label: {cf['name']} -> '{cf['label']}'")
+                else:
+                    print(f"  ✖ Failed to update label for {cf['name']}: {resp.text}")
 
             # Apply missing roles
             for r in missing_roles:

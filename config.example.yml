@@ -66,20 +66,29 @@ traefik:
   # Feature definitions: bundle pattern detection with target NetBox custom field
   middlewares:
     ip_whitelist:
-      netbox_field: "ip_whitelist"
-      patterns:
+      netbox_field: "ip_whitelist"         # NetBox custom field name (auto-created by bootstrap)
+      netbox_label: "IP Whitelist"         # Human-readable label shown in NetBox UI
+      patterns:                            # Match any of these substrings in a route's middleware list
         - "whitelist"
         - "allowlist"
         - "private-ip"
         - "local-only"
     sso:
       netbox_field: "sso_protected"
+      netbox_label: "SSO Protected"
       patterns:
         - "sso"
         - "forward-auth"
         - "authelia"
         - "authentik"
         - "oauth"
+    # Add any custom middleware — bootstrap will auto-create the NetBox custom field:
+    # waf:
+    #   netbox_field: "waf_protected"
+    #   netbox_label: "WAF Protected"
+    #   patterns:
+    #     - "npu-waf"
+    #     - "modsecurity"
 
   # Target NetBox custom field names for extracted route attributes
   # Accepted Traefik route attributes: fqdn, public_url, middlewares

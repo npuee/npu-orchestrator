@@ -32,6 +32,18 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "traefik": {
         "enabled": True,
         "sync_interval_minutes": 15,
+        "service_tag": "traefik",
+        "middleware_patterns": {
+            "ip_whitelist": ["whitelist", "allowlist", "npu-ip-whitelist"],
+            "sso": ["sso", "forward-auth", "authelia", "authentik", "npu-sso"],
+        },
+        "custom_fields": {
+            "public_url": "public_url",
+            "fqdn": "fqdn",
+            "sso_protected": "sso_protected",
+            "ip_whitelist": "ip_whitelist",
+            "middlewares": "middlewares",
+        },
         "instances": [
             {
                 "name": "traefik-local",
@@ -59,7 +71,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "uptime_kuma": {
         "enabled": True,
-        "public_url": "https://kuma.npu.ee",
+        "public_url": "http://localhost:3001",
         "sync_interval_minutes": 30,
         "sync_on_startup": True,
         "enable_default_notifications": True,

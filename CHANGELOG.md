@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+- **Configurable Traefik Middleware Matching & Custom Fields Mapping**:
+  - Added `middleware_patterns` in `config.yml` allowing user-defined middleware substrings for detecting IP whitelist and SSO protection without hardcoded middleware names.
+  - Added `custom_fields` mapping in `config.yml` allowing flexible mapping between orchestrator service attributes and NetBox custom field names.
+  - Added `service_tag` configuration option to assign a single clean tag (default `"traefik"`) to all discovered routes, with automatic tag verification and creation in NetBox.
+
+### Changed
+- **Streamlined Service Tagging**:
+  - Replaced redundant service tags (`SSO`, `NPU Whitelist`, `Public Ingress`) with a single Traefik service tag; protection status is cleanly represented via boolean custom field checkmarks.
+  - NetBox sync reconciliation automatically migrates existing services to the unified service tag.
+
+---
+
 ## [0.0.3] - 2026-09-04
 
 ### Added

@@ -2,7 +2,7 @@ import glob
 import logging
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import httpx
 import yaml
 
@@ -25,6 +25,91 @@ class TraefikSyncDriver:
     2. Remote REST API mode (NetBox Bare-Metal Device or Host)
     and idempotently synchronizes them into NetBox as Application Services.
     """
+
+    def __init__(self):
+        self._cached_service_tag: Optional[List[Dict[str, str]]] = None
+
+    def evaluate_middlewares(self, middlewares: Any) -> Tuple[bool, bool]:
+        """
+        Evaluates whether the given middlewares match configured patterns for
+        ip_whitelist and sso_protected.
+        Configurable via traefik.middleware_patterns in config.yml:
+          middleware_patterns:
+            ip_whitelist: ["whitelist", "allowlist", "npu-ip-whitelist"]
+            sso: ["sso", "forward-auth", "authelia", "authentik", "npu-sso"]
+        """
+        traefik_cfg = app_config.traefik if app_config else {}
+        patterns = traefik_cfg.get("middleware_patterns", {})
+        whitelist_patterns = patterns.get("ip_whitelist", ["whitelist", "allowlist", "npu-ip-whitelist"])
+        sso_patterns = patterns.get("sso", ["sso", "forward-auth", "authelia", "authentik", "npu-sso"])
+
+        if isinstance(middlewares, (list, tuple, set)):
+            m_str = " ".join(str(m) for m in middlewares).lower()
+        else:
+            m_str = str(middlewares or "").lower()
+
+        is_whitelist = any(str(pat).lower() in m_str for pat in whitelist_patterns)
+        is_sso = any(str(pat).lower() in m_str for pat in sso_patterns)
+        return is_whitelist, is_sso
+
+    def get_service_tags(self) -> List[Dict[str, str]]:
+        """
+        Returns the tag list for discovered Traefik services.
+        Defaults to [{"name": "Traefik", "slug": "traefik"}].
+        Configurable via traefik.service_tag in config.yml.
+        If service_tag is null or empty, returns empty list.
+        """
+        if self._cached_service_tag is not None:
+            return self._cached_service_tag
+
+        traefik_cfg = app_config.traefik if app_config else {}
+        tag_val = traefik_cfg.get("service_tag", "traefik")
+        if not tag_val:
+            return []
+
+        slug = re.sub(r"[^a-z0-9_-]", "-", str(tag_val).lower()).strip("-")
+        name = str(tag_val).replace("-", " ").replace("_", " ").title()
+        return [{"name": name, "slug": slug}]
+
+    async def ensure_service_tag(self, client: httpx.AsyncClient, headers: Dict[str, str]) -> List[Dict[str, str]]:
+        """
+        Verifies that the configured service_tag exists in NetBox, creating it if needed.
+        Caches the resulting tag object for fast reuse.
+        """
+        traefik_cfg = app_config.traefik if app_config else {}
+        tag_val = traefik_cfg.get("service_tag", "traefik")
+        if not tag_val:
+            self._cached_service_tag = []
+            return []
+
+        slug = re.sub(r"[^a-z0-9_-]", "-", str(tag_val).lower()).strip("-")
+        display_name = str(tag_val).replace("-", " ").replace("_", " ").title()
+
+        try:
+            resp = await client.get(f"{netbox_driver.base_url}/api/extras/tags/?slug={slug}", headers=headers)
+            if resp.status_code == 200 and resp.json().get("results"):
+                matched = resp.json()["results"][0]
+                self._cached_service_tag = [{"name": matched["name"], "slug": matched["slug"]}]
+                return self._cached_service_tag
+
+            # Create missing tag in NetBox
+            create_payload = {
+                "name": display_name,
+                "slug": slug,
+                "color": "2496ed",
+                "description": "Traefik reverse proxy ingress route",
+            }
+            create_resp = await client.post(f"{netbox_driver.base_url}/api/extras/tags/", headers=headers, json=create_payload)
+            if create_resp.status_code in (200, 201):
+                res_data = create_resp.json()
+                self._cached_service_tag = [{"name": res_data.get("name", display_name), "slug": res_data.get("slug", slug)}]
+                logger.info("Created NetBox Tag '%s' (slug: %s)", display_name, slug)
+                return self._cached_service_tag
+        except Exception as e:
+            logger.warning("Failed to verify/create NetBox tag '%s': %s", slug, e)
+
+        self._cached_service_tag = [{"name": display_name, "slug": slug}]
+        return self._cached_service_tag
 
     @staticmethod
     def format_service_name(raw_name: str) -> str:
@@ -123,16 +208,8 @@ class TraefikSyncDriver:
                                     combined_middlewares.append(rm)
 
                             middlewares_str = ", ".join(combined_middlewares)
-                            sso_protected = "npu-sso" in middlewares_str.lower()
-                            ip_whitelist = "npu-ip-whitelist" in middlewares_str.lower()
-
-                            tags = []
-                            if sso_protected:
-                                tags.append({"name": "SSO", "slug": "sso"})
-                            if ip_whitelist:
-                                tags.append({"name": "NPU Whitelist", "slug": "npu-whitelist"})
-                            if not sso_protected and not ip_whitelist:
-                                tags.append({"name": "Public Ingress", "slug": "public-ingress"})
+                            ip_whitelist, sso_protected = self.evaluate_middlewares(combined_middlewares)
+                            tags = self.get_service_tags()
 
                             nets = c.get("NetworkSettings", {}).get("Networks", {})
                             c_ip = ""
@@ -209,16 +286,8 @@ class TraefikSyncDriver:
                                 combined_middlewares.append(rm)
 
                         middlewares_str = ", ".join(combined_middlewares)
-                        sso_protected = "npu-sso" in middlewares_str.lower()
-                        ip_whitelist = "npu-ip-whitelist" in middlewares_str.lower()
-
-                        tags = []
-                        if sso_protected:
-                            tags.append({"name": "SSO", "slug": "sso"})
-                        if ip_whitelist:
-                            tags.append({"name": "NPU Whitelist", "slug": "npu-whitelist"})
-                        if not sso_protected and not ip_whitelist:
-                            tags.append({"name": "Public Ingress", "slug": "public-ingress"})
+                        ip_whitelist, sso_protected = self.evaluate_middlewares(combined_middlewares)
+                        tags = self.get_service_tags()
 
                         svc_name = r_conf.get("service")
                         target_url = "dynamic"
@@ -296,17 +365,8 @@ class TraefikSyncDriver:
                     # Middlewares
                     middlewares = r.get("middlewares", [])
                     middlewares_str = ", ".join(middlewares)
-
-                    sso_protected = "npu-sso" in middlewares_str.lower()
-                    ip_whitelist = "npu-ip-whitelist" in middlewares_str.lower()
-
-                    tags = []
-                    if sso_protected:
-                        tags.append({"name": "SSO", "slug": "sso"})
-                    if ip_whitelist:
-                        tags.append({"name": "NPU Whitelist", "slug": "npu-whitelist"})
-                    if not sso_protected and not ip_whitelist:
-                        tags.append({"name": "Public Ingress", "slug": "public-ingress"})
+                    ip_whitelist, sso_protected = self.evaluate_middlewares(middlewares)
+                    tags = self.get_service_tags()
 
                     service_name = self.format_service_name(r_raw_name)
                     description = f"Traefik Ingress: {primary_host} -> {target_url}"
@@ -422,13 +482,29 @@ class TraefikSyncDriver:
 
             existing_list = resp.json().get("results", [])
                 
+            # Ensure configured service tag exists in NetBox and attach to all routes
+            ensured_tags = await self.ensure_service_tag(client, headers)
+            for r in routes:
+                r["tags"] = ensured_tags
+
+            # Load custom fields mapping from config.yml
+            traefik_cfg = app_config.traefik if app_config else {}
+            cf_map = traefik_cfg.get("custom_fields", {})
+            field_public_url = cf_map.get("public_url", "public_url")
+            field_fqdn = cf_map.get("fqdn", "fqdn")
+            field_sso = cf_map.get("sso_protected", "sso_protected")
+            field_whitelist = cf_map.get("ip_whitelist", "ip_whitelist")
+            field_middlewares = cf_map.get("middlewares", "middlewares")
+
             existing_by_fqdn = {}
             existing_by_name = {}
             for svc in existing_list:
                 cfields = svc.get("custom_fields", {})
-                fqdn_val = cfields.get("fqdn")
+                fqdn_val = cfields.get(field_fqdn) if field_fqdn else None
+                if not fqdn_val:
+                    fqdn_val = cfields.get("fqdn")
                 if fqdn_val:
-                    for f_part in fqdn_val.split(","):
+                    for f_part in str(fqdn_val).split(","):
                         existing_by_fqdn[f_part.strip().lower()] = svc
                 existing_by_name[svc.get("name", "").lower()] = svc
 
@@ -436,13 +512,17 @@ class TraefikSyncDriver:
                 primary_fqdn = r["primary_fqdn"].lower()
                 existing_svc = existing_by_fqdn.get(primary_fqdn) or existing_by_name.get(r["name"].lower())
 
-                custom_fields_payload = {
-                    "fqdn": r["fqdn"],
-                    "public_url": r["public_url"],
-                    "sso_protected": r["sso_protected"],
-                    "ip_whitelist": r["ip_whitelist"],
-                    "middlewares": r["middlewares"],
-                }
+                custom_fields_payload = {}
+                if field_fqdn:
+                    custom_fields_payload[field_fqdn] = r["fqdn"]
+                if field_public_url:
+                    custom_fields_payload[field_public_url] = r["public_url"]
+                if field_sso:
+                    custom_fields_payload[field_sso] = r["sso_protected"]
+                if field_whitelist:
+                    custom_fields_payload[field_whitelist] = r["ip_whitelist"]
+                if field_middlewares:
+                    custom_fields_payload[field_middlewares] = r["middlewares"]
 
                 service_payload = {
                     "name": r["name"],
@@ -468,11 +548,11 @@ class TraefikSyncDriver:
                         curr_name != r["name"]
                         or curr_desc != r["description"]
                         or curr_ports != r["ports"]
-                        or curr_cf.get("public_url") != r["public_url"]
-                        or curr_cf.get("fqdn") != r["fqdn"]
-                        or curr_cf.get("sso_protected") != r["sso_protected"]
-                        or curr_cf.get("ip_whitelist") != r["ip_whitelist"]
-                        or curr_cf.get("middlewares") != r["middlewares"]
+                        or (field_public_url and curr_cf.get(field_public_url) != r["public_url"])
+                        or (field_fqdn and curr_cf.get(field_fqdn) != r["fqdn"])
+                        or (field_sso and curr_cf.get(field_sso) != r["sso_protected"])
+                        or (field_whitelist and curr_cf.get(field_whitelist) != r["ip_whitelist"])
+                        or (field_middlewares and curr_cf.get(field_middlewares) != r["middlewares"])
                         or set(curr_tags) != set(new_tags)
                     )
 

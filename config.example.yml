@@ -59,6 +59,30 @@ templates:
 traefik:
   enabled: true
   sync_interval_minutes: 15
+  service_tag: "traefik"            # Single NetBox tag applied to discovered routes (e.g. "traefik" or "traefik-route")
+
+  # Substrings or middleware names used to detect IP whitelist and SSO protection
+  middleware_patterns:
+    ip_whitelist:
+      - "whitelist"
+      - "allowlist"
+      - "private-ip"
+      - "local-only"
+    sso:
+      - "sso"
+      - "forward-auth"
+      - "authelia"
+      - "authentik"
+      - "oauth"
+
+  # NetBox custom field name mapping for ipam.service objects
+  custom_fields:
+    public_url: "public_url"
+    fqdn: "fqdn"
+    sso_protected: "sso_protected"
+    ip_whitelist: "ip_whitelist"
+    middlewares: "middlewares"
+
   instances:
     - name: "traefik-main"          # Local Docker Traefik on VM
       netbox_vm_id: 10              # NetBox VM ID (virtualization.virtualmachine)

@@ -42,10 +42,10 @@ DEFAULT_CUSTOM_FIELDS = [
     {"name": "guest_agent", "label": "Guest Agent", "type": "text", "object_types": ["virtualization.virtualmachine"], "description": "Live QEMU Guest Agent status from Proxmox VE"},
     {"name": "metrics_updated", "label": "Metrics Last Synced", "type": "text", "object_types": ["virtualization.virtualmachine"], "description": "Timestamp when 24-hour telemetry was last synchronized"},
     {"name": "requested_ip", "label": "IP Address (Optional)", "type": "text", "object_types": ["virtualization.virtualmachine"], "description": "Optional static IPv4 address. If left blank, next IP is auto-allocated."},
-    {"name": "fqdn", "label": "FQDN / Domain", "type": "text", "object_types": ["ipam.service"], "description": "Fully Qualified Domain Name or hostname (e.g. media.npu.ee)"},
-    {"name": "public_url", "label": "Public URL", "type": "url", "object_types": ["ipam.service"], "description": "Full Public HTTPS/HTTP URL (e.g. https://media.npu.ee)"},
-    {"name": "sso_protected", "label": "SSO Protected", "type": "boolean", "object_types": ["ipam.service"], "description": "Protected by Azure AD SSO ForwardAuth (npu-sso)"},
-    {"name": "ip_whitelist", "label": "NPU Whitelist", "type": "boolean", "object_types": ["ipam.service"], "description": "Restricted to NPU IP Whitelist (npu-ip-whitelist)"},
+    {"name": "fqdn", "label": "FQDN / Domain", "type": "text", "object_types": ["ipam.service"], "description": "Fully Qualified Domain Name or hostname (e.g. media.example.com)"},
+    {"name": "public_url", "label": "Public URL", "type": "url", "object_types": ["ipam.service"], "description": "Full Public HTTPS/HTTP URL (e.g. https://media.example.com)"},
+    {"name": "sso_protected", "label": "SSO Protected", "type": "boolean", "object_types": ["ipam.service"], "description": "Protected by Single Sign-On (SSO / ForwardAuth)"},
+    {"name": "ip_whitelist", "label": "IP Whitelist", "type": "boolean", "object_types": ["ipam.service"], "description": "Restricted to specific IP Whitelist / Allowlist"},
     {"name": "middlewares", "label": "Middlewares", "type": "text", "object_types": ["ipam.service"], "description": "Active Traefik Middleware Chain"},
     {"name": "kuma_monitor_id", "label": "Uptime Kuma ID", "type": "integer", "object_types": ["dcim.device", "virtualization.virtualmachine"], "description": "Monitor ID in Uptime Kuma"},
 ]
@@ -56,9 +56,7 @@ DEFAULT_ROLES = [
 ]
 
 DEFAULT_TAGS = [
-    {"name": "SSO", "slug": "sso", "color": "9c27b0", "description": "Protected by Azure AD SSO ForwardAuth"},
-    {"name": "NPU Whitelist", "slug": "npu-whitelist", "color": "ff9800", "description": "Restricted to NPU IP Whitelist"},
-    {"name": "Public Ingress", "slug": "public-ingress", "color": "4caf50", "description": "Publicly accessible via Traefik ingress"},
+    {"name": "Traefik", "slug": "traefik", "color": "2496ed", "description": "Traefik reverse proxy ingress route"},
     {"name": "No Monitor", "slug": "no-monitor", "color": "9e9e9e", "description": "Excluded from automated Uptime Kuma ping monitoring"},
     {"name": "Decommissioned", "slug": "decommissioned", "color": "607d8b", "description": "Workload safely decommissioned, isolated, and powered off"},
 ]
@@ -121,7 +119,7 @@ class NetBoxSanityChecker:
 
             # 2. Audit NetBox DNS Plugin & Default Zone
             dns_enabled = module_manager.is_enabled("dns") if module_manager else (app_config.dns.get("auto_register_a", True) if app_config else True)
-            zone_name = app_config.dns.get("default_zone", "npu.house") if app_config else "npu.house"
+            zone_name = app_config.dns.get("default_zone", "homelab.local") if app_config else "homelab.local"
             has_dns_plugin = False
             has_dns_zone = False
             if not dns_enabled:
@@ -174,12 +172,22 @@ class NetBoxSanityChecker:
                     print(f"[✖ OUTDATED] Device / VM Roles: Missing {len(missing_roles)} role(s) -> {names}")
 
             # 5. Audit Infrastructure Tags
+            required_tags = list(DEFAULT_TAGS)
+            if app_config:
+                svc_tag = app_config.traefik.get("service_tag")
+                if svc_tag:
+                    import re
+                    t_slug = re.sub(r"[^a-z0-9_-]", "-", str(svc_tag).lower()).strip("-")
+                    t_name = str(svc_tag).replace("-", " ").replace("_", " ").title()
+                    if not any(t["slug"] == t_slug for t in required_tags):
+                        required_tags.append({"name": t_name, "slug": t_slug, "color": "2496ed", "description": "Traefik reverse proxy ingress route"})
+
             existing_tags = await self.get_existing_map("extras/tags", "slug", client)
-            missing_tags = [t for t in DEFAULT_TAGS if t["slug"] not in existing_tags]
+            missing_tags = [t for t in required_tags if t["slug"] not in existing_tags]
 
             if not summary_mode:
                 if not missing_tags:
-                    print(f"[✔ OK] Infrastructure Tags   : All {len(DEFAULT_TAGS)}/{len(DEFAULT_TAGS)} tags present ({', '.join(t['slug'] for t in DEFAULT_TAGS)})")
+                    print(f"[✔ OK] Infrastructure Tags   : All {len(required_tags)}/{len(required_tags)} tags present ({', '.join(t['slug'] for t in required_tags)})")
                 else:
                     names = ", ".join(f"'{t['name']}'" for t in missing_tags)
                     print(f"[✖ OUTDATED] Infrastructure Tags: Missing {len(missing_tags)} tag(s) -> {names}")
@@ -398,11 +406,12 @@ class NetBoxSanityChecker:
                         print(f"  ✔ Created LXC Blueprint Type: {t['name']}")
 
             if kuma_enabled and not has_kuma_link:
+                kuma_url = (app_config.uptime_kuma.get("public_url") if app_config else "http://localhost:3001").rstrip("/")
                 kuma_link_payload = {
                     "name": "View in Uptime Kuma",
                     "object_types": ["dcim.device", "virtualization.virtualmachine"],
                     "link_text": "{% if object.cf.kuma_monitor_id or object.primary_ip %}📊 Uptime Kuma{% endif %}",
-                    "link_url": "https://kuma.npu.ee/dashboard/{% if object.cf.kuma_monitor_id %}{{ object.cf.kuma_monitor_id }}{% endif %}",
+                    "link_url": f"{kuma_url}/dashboard/{{% if object.cf.kuma_monitor_id %}}{{{{ object.cf.kuma_monitor_id }}}}{{% endif %}}",
                     "button_class": "cyan",
                     "new_window": True,
                 }

@@ -2,6 +2,7 @@ import logging
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from app import __version__
 from app.core.config import settings
 from app.storage.db import db
 from app.api.v1.webhooks import router as webhooks_router
@@ -256,7 +257,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title=settings.APP_NAME,
-    version="0.0.2",
+    version=__version__,
     description="Central Infrastructure Orchestrator (NetBox Webhooks, Proxmox VE Orchestration, Signal Alerts)",
     lifespan=lifespan,
     docs_url="/docs",
@@ -276,7 +277,7 @@ app.include_router(system_router, prefix="/api/v1")
 async def root():
     return {
         "service": settings.APP_NAME,
-        "version": "0.0.2",
+        "version": __version__,
         "status": "online",
         "docs": "/docs",
         "endpoints": {

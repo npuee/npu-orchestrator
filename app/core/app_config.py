@@ -34,15 +34,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "sync_interval_minutes": 15,
         "instances": [
             {
-                "name": "traefik-oracle",
-                "netbox_vm_id": 7,
+                "name": "traefik-local",
+                "netbox_vm_id": 1,
                 "type": "docker",
-                "path": "/cloud/traefik",
-                "conf_dir": "/cloud/traefik/conf",
+                "path": "/etc/traefik",
+                "conf_dir": "/etc/traefik/conf",
             },
             {
-                "name": "traefik-lohusuu",
-                "netbox_vm_id": 6,
+                "name": "traefik-remote",
+                "netbox_device_id": 1,
                 "type": "api",
                 "api_url": "http://192.168.1.50:8080",
             },

@@ -8,7 +8,7 @@
 [![NetBox](https://img.shields.io/badge/NetBox-4.x-004D40.svg?style=flat&logo=netbox&logoColor=white)](https://netboxlabs.com)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg?style=flat&logo=docker&logoColor=white)](https://docker.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.0.2-green.svg)](app/__init__.py)
+[![Version](https://img.shields.io/badge/version-0.0.3-green.svg)](app/__init__.py)
 
 ---
 

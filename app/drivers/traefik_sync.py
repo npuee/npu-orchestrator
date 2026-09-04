@@ -21,10 +21,22 @@ REMOTE_DEFAULT_TRAEFIK_API = "http://192.168.1.50:8080"
 class TraefikSyncDriver:
     """
     Discovers Traefik Ingress Routers from multiple instances:
-    1. traefik-oracle (Oracle Cloud Docker & Local configs -> NetBox VM #7)
-    2. traefik-remote (Proxmox VE On-Premises Service -> NetBox VM #6)
+    1. Local Docker socket mode / file configs (NetBox Virtual Machine)
+    2. Remote REST API mode (NetBox Bare-Metal Device or Host)
     and idempotently synchronizes them into NetBox as Application Services.
     """
+
+    @staticmethod
+    def format_service_name(raw_name: str) -> str:
+        """
+        Formats a clean, all-lowercase service name without 'Ingress' suffix.
+        Strips file extensions (.yml, .yaml), domain suffixes, replaces punctuation/dashes
+        with spaces, and trims whitespace.
+        """
+        name = re.sub(r"\.ya?ml$", "", raw_name, flags=re.IGNORECASE)
+        name = re.sub(r"\.[a-z0-9-]+\.(?:[a-z]{2,})$", "", name, flags=re.IGNORECASE)
+        name = name.replace("-", " ").replace("_", " ").replace(".", " ")
+        return re.sub(r"\s+", " ", name).strip().lower()
 
     def get_default_entrypoint_middlewares(self, traefik_dir: Optional[str] = None) -> List[str]:
         """Reads default entrypoint middlewares from traefik.yml (e.g. websecure)."""
@@ -127,8 +139,7 @@ class TraefikSyncDriver:
                             if nets:
                                 c_ip = list(nets.values())[0].get("IPAddress", "")
                             
-                            friendly_name = c_name.replace("-", " ").title()
-                            service_name = f"{friendly_name} Ingress"
+                            service_name = self.format_service_name(c_name)
                             target_backend = f"http://{c_ip}:{port_val}" if c_ip else f"port {port_val}"
                             description = f"Traefik Ingress: {primary_host} -> {target_backend}"
                             
@@ -216,8 +227,8 @@ class TraefikSyncDriver:
                             if servers and isinstance(servers[0], dict) and "url" in servers[0]:
                                 target_url = servers[0]["url"]
 
-                        fname = os.path.basename(ypath).replace(".yml", "").replace(".yaml", "")
-                        service_name = f"{fname.replace('-', ' ').title()} Ingress"
+                        fname = os.path.basename(ypath)
+                        service_name = self.format_service_name(fname)
                         description = f"Traefik Ingress: {primary_host} -> {target_url}"
 
                         routes.append({
@@ -297,8 +308,7 @@ class TraefikSyncDriver:
                     if not sso_protected and not ip_whitelist:
                         tags.append({"name": "Public Ingress", "slug": "public-ingress"})
 
-                    friendly_name = r_raw_name.replace("-", " ").replace(".", " ").title()
-                    service_name = f"{friendly_name} Ingress"
+                    service_name = self.format_service_name(r_raw_name)
                     description = f"Traefik Ingress: {primary_host} -> {target_url}"
 
                     routes.append({
@@ -341,17 +351,42 @@ class TraefikSyncDriver:
     async def sync_instance(
         self,
         instance_name: str,
-        netbox_vm_id: int,
+        netbox_vm_id: Optional[int] = None,
+        netbox_device_id: Optional[int] = None,
         instance_conf: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Synchronizes a specific Traefik instance into NetBox under netbox_vm_id.
+        Synchronizes a specific Traefik instance into NetBox under either:
+        - netbox_device_id (dcim.device, e.g. bare-metal Proxmox VE host)
+        - netbox_vm_id (virtualization.virtualmachine, e.g. Cloud/OCI VM)
         """
         if not instance_conf:
             for inst in app_config.traefik.get("instances", []):
-                if inst.get("name") == instance_name or inst.get("netbox_vm_id") == netbox_vm_id:
+                if inst.get("name") == instance_name:
                     instance_conf = inst
                     break
+                if netbox_vm_id and inst.get("netbox_vm_id") == netbox_vm_id:
+                    instance_conf = inst
+                    break
+                if netbox_device_id and inst.get("netbox_device_id") == netbox_device_id:
+                    instance_conf = inst
+                    break
+
+        vm_id = netbox_vm_id or (instance_conf or {}).get("netbox_vm_id")
+        device_id = netbox_device_id or (instance_conf or {}).get("netbox_device_id")
+
+        if device_id:
+            parent_type = "dcim.device"
+            parent_id = int(device_id)
+            filter_param = f"device_id={parent_id}"
+            parent_label = f"Device #{parent_id}"
+        elif vm_id:
+            parent_type = "virtualization.virtualmachine"
+            parent_id = int(vm_id)
+            filter_param = f"virtual_machine_id={parent_id}"
+            parent_label = f"VM #{parent_id}"
+        else:
+            raise ValueError(f"Traefik instance '{instance_name}' must specify either 'netbox_vm_id' or 'netbox_device_id'.")
 
         inst_type = (instance_conf or {}).get("type", "api" if "remote" in instance_name else "docker")
         api_url = (instance_conf or {}).get("api_url", REMOTE_DEFAULT_TRAEFIK_API)
@@ -379,11 +414,11 @@ class TraefikSyncDriver:
         try:
             client = netbox_driver._get_client()
             resp = await client.get(
-                f"{netbox_driver.base_url}/api/ipam/services/?virtual_machine_id={netbox_vm_id}&limit=100",
+                f"{netbox_driver.base_url}/api/ipam/services/?{filter_param}&limit=100",
                 headers=headers,
             )
             if resp.status_code != 200:
-                raise RuntimeError(f"Failed to fetch NetBox services for VM {netbox_vm_id}: {resp.status_code} {resp.text}")
+                raise RuntimeError(f"Failed to fetch NetBox services for {parent_label}: {resp.status_code} {resp.text}")
 
             existing_list = resp.json().get("results", [])
                 
@@ -411,8 +446,8 @@ class TraefikSyncDriver:
 
                 service_payload = {
                     "name": r["name"],
-                    "parent_object_type": "virtualization.virtualmachine",
-                    "parent_object_id": netbox_vm_id,
+                    "parent_object_type": parent_type,
+                    "parent_object_id": parent_id,
                     "protocol": r["protocol"],
                     "ports": r["ports"],
                     "description": r["description"],
@@ -422,6 +457,7 @@ class TraefikSyncDriver:
 
                 if existing_svc:
                     svc_id = existing_svc["id"]
+                    curr_name = existing_svc.get("name", "")
                     curr_desc = existing_svc.get("description", "")
                     curr_ports = existing_svc.get("ports", [])
                     curr_cf = existing_svc.get("custom_fields", {})
@@ -429,7 +465,8 @@ class TraefikSyncDriver:
                     new_tags = [t["slug"] for t in r["tags"]]
 
                     needs_update = (
-                        curr_desc != r["description"]
+                        curr_name != r["name"]
+                        or curr_desc != r["description"]
                         or curr_ports != r["ports"]
                         or curr_cf.get("public_url") != r["public_url"]
                         or curr_cf.get("fqdn") != r["fqdn"]
@@ -444,6 +481,7 @@ class TraefikSyncDriver:
                             f"{netbox_driver.base_url}/api/ipam/services/{svc_id}/",
                             headers=headers,
                             json={
+                                "name": r["name"],
                                 "description": r["description"],
                                 "ports": r["ports"],
                                 "tags": r["tags"],
@@ -458,7 +496,7 @@ class TraefikSyncDriver:
                                 "sso": r["sso_protected"],
                                 "whitelist": r["ip_whitelist"],
                             })
-                            logger.info("[%s] Updated NetBox Service %s (ID: %d)", instance_name, r["name"], svc_id)
+                            logger.info("[%s] Updated NetBox Service %s (ID: %d) on %s", instance_name, r["name"], svc_id, parent_label)
                         else:
                             logger.warning("[%s] Failed to update Service %d: %s", instance_name, svc_id, patch_resp.text)
                     else:
@@ -484,9 +522,9 @@ class TraefikSyncDriver:
                             "sso": r["sso_protected"],
                             "whitelist": r["ip_whitelist"],
                         })
-                        logger.info("[%s] Created NetBox Service %s (ID: %d)", instance_name, r["name"], new_id)
+                        logger.info("[%s] Created NetBox Service %s (ID: %d) on %s", instance_name, r["name"], new_id, parent_label)
                     else:
-                        logger.warning("[%s] Failed to create Service %s: %s", instance_name, r["name"], post_resp.text)
+                        logger.warning("[%s] Failed to create Service %s on %s: %s", instance_name, r["name"], parent_label, post_resp.text)
 
         except Exception as e:
             logger.exception("Error syncing Traefik routes for %s: %s", instance_name, e)
@@ -495,7 +533,10 @@ class TraefikSyncDriver:
         return {
             "status": "success",
             "instance": instance_name,
-            "netbox_vm_id": netbox_vm_id,
+            "parent_type": parent_type,
+            "parent_id": parent_id,
+            "netbox_vm_id": vm_id,
+            "netbox_device_id": device_id,
             "total_discovered": len(routes),
             "created_count": len(created),
             "updated_count": len(updated),
@@ -515,19 +556,20 @@ class TraefikSyncDriver:
         instances = traefik_cfg.get("instances", [])
         if not instances:
             instances = [
-                {"name": "traefik-oracle", "netbox_vm_id": 7, "type": "docker", "path": "/cloud/traefik", "conf_dir": "/cloud/traefik/conf"},
-                {"name": "traefik-remote", "netbox_vm_id": 6, "type": "api", "api_url": "http://192.168.1.50:8080"},
+                {"name": "traefik-local", "netbox_vm_id": 1, "type": "docker", "path": "/etc/traefik", "conf_dir": "/etc/traefik/conf"},
+                {"name": "traefik-remote", "netbox_device_id": 1, "type": "api", "api_url": "http://192.168.1.50:8080"},
             ]
 
         results = {}
         for inst in instances:
             name = inst.get("name", "unknown")
             vm_id = inst.get("netbox_vm_id")
-            if not vm_id:
-                logger.warning("Traefik instance '%s' is missing netbox_vm_id in config.yml. Skipping.", name)
+            device_id = inst.get("netbox_device_id")
+            if not vm_id and not device_id:
+                logger.warning("Traefik instance '%s' is missing both netbox_vm_id and netbox_device_id in config.yml. Skipping.", name)
                 continue
             try:
-                res = await self.sync_instance(name, netbox_vm_id=vm_id, instance_conf=inst)
+                res = await self.sync_instance(name, netbox_vm_id=vm_id, netbox_device_id=device_id, instance_conf=inst)
                 results[name] = res
             except Exception as e:
                 logger.error("Failed to sync Traefik instance '%s': %s", name, e)

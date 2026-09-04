@@ -94,6 +94,30 @@ class ProxmoxDriver:
 
         return settings.PROXMOX_DEFAULT_NODE or "pve"
 
+    def find_vm_by_name(self, hostname: str) -> Optional[Dict[str, Any]]:
+        """
+        Searches the Proxmox VE cluster for any existing QEMU VM or LXC container
+        with a matching name (case-insensitive).
+        Returns a dictionary with vmid, name, node, type, and status if found, else None.
+        """
+        pve = self.get_client()
+        target_name = hostname.strip().lower()
+        try:
+            resources = pve.cluster.resources.get(type="vm")
+            for r in resources:
+                r_name = str(r.get("name") or "").strip().lower()
+                if r_name == target_name:
+                    return {
+                        "vmid": int(r["vmid"]),
+                        "name": r.get("name"),
+                        "node": r.get("node"),
+                        "type": r.get("type", "qemu"),
+                        "status": r.get("status", "unknown"),
+                    }
+        except Exception as e:
+            logger.warning("Could not query cluster resources in find_vm_by_name: %s", e)
+        return None
+
     def list_templates(self, node: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Discovers all template/source VMs on the cluster or a specific node, categorized into Linux and Windows.
@@ -186,8 +210,14 @@ class ProxmoxDriver:
             category = "windows" if str(requested_template_id).startswith("92") else "linux"
             return requested_template_id, f"template-{requested_template_id}", category
 
-        # 0. Deterministic Match from Platform Description or Slug
+        # 0. Deterministic Match for LXC Platform
         desc_info = f"{platform_description or ''} {platform_slug or ''}"
+        if "[Proxmox LXC Template:" in desc_info or (platform_slug and platform_slug.startswith("pve-lxc-")):
+            m_lxc = re.search(r"\[Proxmox LXC Template:\s*([^\]]+)\]", desc_info)
+            volid_name = m_lxc.group(1).strip() if m_lxc else (platform_name or "LXC Template")
+            return 0, volid_name, "lxc"
+
+        # 1. Deterministic Match from Platform Description or Slug for VM
         m_vmid = re.search(r"\[Proxmox VM Template:\s*(\d+)\]", desc_info)
         if not m_vmid:
             m_vmid = re.search(r"pve-vm-(\d+)-", desc_info)
@@ -309,7 +339,11 @@ class ProxmoxDriver:
         target_domain = dns_domain or settings.DEFAULT_DNS_DOMAIN
         
         if not ip_address:
-            ip_address = f"10.8.1.{vmid}"
+            if vmid and vmid <= 254:
+                gw_base = target_gw.rsplit(".", 1)[0]
+                ip_address = f"{gw_base}.{vmid}"
+            else:
+                raise ValueError(f"No IP address provided and VMID {vmid} exceeds /24 host boundary (1-254)")
         ip_cidr = ip_address if "/" in ip_address else f"{ip_address}/24"
 
         # 4. Clone the Template
@@ -474,7 +508,11 @@ class ProxmoxDriver:
         target_domain = dns_domain or settings.DEFAULT_DNS_DOMAIN
 
         if not ip_address:
-            ip_address = f"10.8.1.{vmid}"
+            if vmid and vmid <= 254:
+                gw_base = target_gw.rsplit(".", 1)[0]
+                ip_address = f"{gw_base}.{vmid}"
+            else:
+                raise ValueError(f"No IP address provided and VMID {vmid} exceeds /24 host boundary (1-254)")
         ip_cidr = ip_address if "/" in ip_address else f"{ip_address}/24"
 
         # 4. Clone Template
@@ -601,6 +639,23 @@ class ProxmoxDriver:
                 continue
         return "backups:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
 
+    def calculate_ip_and_gateway(
+        self,
+        vmid: int,
+        ip_address: Optional[str] = None,
+        gateway: Optional[str] = None,
+    ) -> Tuple[str, str]:
+        """Calculates IP CIDR (e.g. 192.168.1.50/24) and default gateway."""
+        target_gw = gateway or settings.DEFAULT_GATEWAY
+        if not ip_address:
+            if vmid and vmid <= 254:
+                gw_base = target_gw.rsplit(".", 1)[0]
+                ip_address = f"{gw_base}.{vmid}"
+            else:
+                raise ValueError(f"No IP address provided and VMID {vmid} exceeds /24 host boundary (1-254)")
+        ip_cidr = ip_address if "/" in ip_address else f"{ip_address}/24"
+        return ip_cidr, target_gw
+
     def create_lxc_container(
         self,
         hostname: str,
@@ -617,9 +672,11 @@ class ProxmoxDriver:
         swap_mb: int = 512,
         onboot: bool = True,
         ssh_key: Optional[str] = None,
+        password: Optional[str] = None,
         storage: Optional[str] = None,
         bridge: Optional[str] = None,
         unprivileged: bool = True,
+        features: str = "nesting=1",
         start_on_create: bool = True,
         log_callback: Optional[Callable[[str], None]] = None,
         progress_callback: Optional[Callable[[str], None]] = None,
@@ -669,8 +726,14 @@ class ProxmoxDriver:
             "searchdomain": target_domain,
             "onboot": 1 if onboot else 0,
             "unprivileged": 1 if unprivileged else 0,
+            "features": features,
             "start": 1 if start_on_create else 0,
         }
+        if password:
+            lxc_params["password"] = password
+            if log_callback:
+                log_callback("Configured root password for container console access.")
+
         if resolved_ssh:
             lxc_params["ssh-public-keys"] = urllib.parse.quote(resolved_ssh, safe="")
             if log_callback:

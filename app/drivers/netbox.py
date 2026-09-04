@@ -244,6 +244,85 @@ class NetBoxDriver:
 
         return False
 
+    async def get_or_allocate_available_ip(
+        self,
+        prefix_cidr: Optional[str] = None,
+        hostname: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        Atomically allocates the next available IP address from the specified NetBox IPAM prefix.
+        Returns the clean IP address string (e.g. '192.168.1.50').
+        """
+        if not self.is_configured():
+            return None
+
+        headers = {
+            "Authorization": f"Token {self.token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+        try:
+            client = self._get_client()
+            target_prefix = prefix_cidr or app_config.defaults.get("subnet")
+            if not target_prefix:
+                site_id = app_config.defaults.get("site_id")
+                resp_s = await client.get(f"{self.base_url}/api/ipam/prefixes/?site_id={site_id}&status=active", headers=headers)
+                if resp_s.status_code == 200:
+                    res_s = resp_s.json().get("results", [])
+                    if res_s:
+                        target_prefix = res_s[0].get("prefix")
+
+            if not target_prefix:
+                target_prefix = "192.168.1.0/24"
+
+            # 1. Resolve Prefix ID
+            resp_p = await client.get(
+                f"{self.base_url}/api/ipam/prefixes/?prefix={target_prefix}",
+                headers=headers,
+            )
+            prefix_id = None
+            if resp_p.status_code == 200:
+                results = resp_p.json().get("results", [])
+                if results:
+                    prefix_id = results[0]["id"]
+
+            if not prefix_id:
+                logger.warning("Could not find NetBox IPAM prefix '%s'", target_prefix)
+                return None
+
+            # 2. Atomically allocate next available IP
+            desc = description or (f"Provisioned for {hostname}" if hostname else "NPU Orchestrator Allocation")
+            payload = {
+                "description": desc,
+                "status": "active",
+            }
+            if hostname:
+                default_domain = app_config.dns.get("default_zone")
+                if default_domain:
+                    payload["dns_name"] = f"{hostname}.{default_domain}".lower()
+                else:
+                    payload["dns_name"] = hostname.lower()
+
+            resp_alloc = await client.post(
+                f"{self.base_url}/api/ipam/prefixes/{prefix_id}/available-ips/",
+                headers=headers,
+                json=payload,
+            )
+            if resp_alloc.status_code in (200, 201):
+                alloc_data = resp_alloc.json()
+                raw_address = alloc_data.get("address", "")
+                clean_ip = raw_address.split("/")[0] if raw_address else None
+                logger.info("Allocated next available IP '%s' (ID: %s) from NetBox IPAM prefix '%s'", clean_ip, alloc_data.get("id"), prefix_cidr)
+                return clean_ip
+            else:
+                logger.warning("Failed to allocate available IP from prefix %d: %s", prefix_id, resp_alloc.text)
+                return None
+        except Exception as exc:
+            logger.warning("Error allocating available IP from NetBox: %s", exc)
+            return None
+
     async def create_or_update_dns_record(
         self,
         hostname: str,

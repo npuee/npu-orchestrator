@@ -27,6 +27,7 @@ async def preview_traefik_routes():
         for inst in instances:
             name = inst.get("name", "unknown")
             vm_id = inst.get("netbox_vm_id")
+            device_id = inst.get("netbox_device_id")
             inst_type = inst.get("type", "docker")
             if inst_type == "api":
                 routes = await traefik_sync_driver.discover_remote_traefik_routes(inst.get("api_url"))
@@ -34,6 +35,9 @@ async def preview_traefik_routes():
                 routes = await traefik_sync_driver.get_oracle_routes(path=inst.get("path"), conf_dir=inst.get("conf_dir"))
             results[name] = {
                 "target_vm_id": vm_id,
+                "target_device_id": device_id,
+                "parent_type": "dcim.device" if device_id else "virtualization.virtualmachine",
+                "parent_id": device_id if device_id else vm_id,
                 "type": inst_type,
                 "total_routes": len(routes),
                 "routes": routes,
@@ -46,24 +50,34 @@ async def preview_traefik_routes():
 
 @router.post("/traefik", summary="Synchronize Traefik Ingress Routes to NetBox")
 async def sync_traefik_routes_to_netbox(
-    netbox_vm_id: Optional[int] = Query(None, description="Specific NetBox VM ID. If omitted, syncs all instances configured in config.yml."),
+    netbox_vm_id: Optional[int] = Query(None, description="Specific NetBox VM ID (virtualization.virtualmachine). If omitted, syncs all configured instances."),
+    netbox_device_id: Optional[int] = Query(None, description="Specific NetBox Device ID (dcim.device). If omitted, syncs all configured instances."),
 ):
     """
     Synchronizes discovered Traefik routes into NetBox as Application Services.
-    If netbox_vm_id is omitted, automatically syncs all instances configured in config.yml.
+    Supports attaching to Virtual Machines (netbox_vm_id) or Bare-Metal Devices (netbox_device_id).
+    If both IDs are omitted, automatically syncs all instances configured in config.yml.
     """
     if not module_manager.is_enabled("traefik"):
         return {"status": "disabled", "message": "Traefik module is disabled or not configured in config.yml"}
 
     try:
-        if netbox_vm_id:
+        if netbox_vm_id or netbox_device_id:
             found = None
             for inst in app_config.traefik.get("instances", []):
-                if inst.get("netbox_vm_id") == netbox_vm_id:
+                if netbox_device_id and inst.get("netbox_device_id") == netbox_device_id:
                     found = inst
                     break
-            name = found.get("name", f"traefik-vm-{netbox_vm_id}") if found else f"traefik-vm-{netbox_vm_id}"
-            res = await traefik_sync_driver.sync_instance(name, netbox_vm_id=netbox_vm_id, instance_conf=found)
+                if netbox_vm_id and inst.get("netbox_vm_id") == netbox_vm_id:
+                    found = inst
+                    break
+            name = found.get("name") if found else (f"traefik-device-{netbox_device_id}" if netbox_device_id else f"traefik-vm-{netbox_vm_id}")
+            res = await traefik_sync_driver.sync_instance(
+                name,
+                netbox_vm_id=netbox_vm_id,
+                netbox_device_id=netbox_device_id,
+                instance_conf=found,
+            )
         else:
             res = await traefik_sync_driver.sync_all_instances()
 

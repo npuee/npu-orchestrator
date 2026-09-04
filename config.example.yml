@@ -52,21 +52,23 @@ templates:
 #   docker - connects to the local Docker socket to read Traefik config files
 #   api    - connects to a remote Traefik instance via its REST API
 #
-# Add one entry per Traefik instance. netbox_vm_id is the ID of the VM running
-# that Traefik instance in NetBox (used to link services to the right host).
+# Add one entry per Traefik instance.
+# - Use netbox_vm_id for Traefik running on a Virtual Machine (e.g. Cloud/OCI VM)
+# - Use netbox_device_id for Traefik running directly on bare metal (e.g. Proxmox host)
+# This links your web routes to the "Application Services" list on that host in NetBox.
 traefik:
   enabled: true
   sync_interval_minutes: 15
   instances:
-    - name: "traefik-main"          # Friendly name (shown in logs)
-      netbox_vm_id: 7               # NetBox VM ID of the server running this Traefik
-      type: "docker"                # Use "docker" if Traefik runs on this same host
-      path: "/cloud/traefik"        # Traefik config directory on disk
-      conf_dir: "/cloud/traefik/conf"  # Traefik dynamic config directory
-    - name: "traefik-remote"        # Remote Traefik instance (API mode)
-      netbox_vm_id: 8               # NetBox VM ID of the server running this Traefik
+    - name: "traefik-main"          # Local Docker Traefik on VM
+      netbox_vm_id: 10              # NetBox VM ID (virtualization.virtualmachine)
+      type: "docker"                # Use "docker" if Traefik runs on this host
+      path: "/etc/traefik"          # Traefik config directory on disk
+      conf_dir: "/etc/traefik/conf" # Traefik dynamic config directory
+    - name: "traefik-remote"        # Remote Traefik instance running on bare metal
+      netbox_device_id: 5           # NetBox Device ID (dcim.device)
       type: "api"                   # Use "api" for remote instances
-      api_url: "http://10.0.0.10:8080"  # Traefik API address
+      api_url: "http://192.168.1.50:8080"  # Traefik API address
 
 # ── Proxmox Telemetry & Metrics Synchronization ──────────────────────────────
 # Periodically queries Proxmox VE for live CPU, RAM, Disk, and Uptime metrics

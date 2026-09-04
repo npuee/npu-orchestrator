@@ -306,8 +306,11 @@ async def run_lxc_provision_task(
                 swap_mb=params.get("swap_mb", 512),
                 onboot=params.get("onboot", True),
                 ssh_key=params.get("ssh_key"),
+                password=params.get("password"),
                 storage=params.get("storage"),
                 bridge=params.get("bridge"),
+                unprivileged=params.get("unprivileged", True),
+                features=params.get("features", "nesting=1"),
                 start_on_create=params.get("start_on_create", True),
                 log_callback=sync_log_callback,
                 progress_callback=netbox_progress,
@@ -318,6 +321,7 @@ async def run_lxc_provision_task(
         hostname = result["hostname"]
         ip_addr = result["ip_address"]
 
+        await db.append_log(job_id, f"LXC container provisioning completed successfully! CT ID: {vmid}")
         await db.update_job(
             job_id,
             status="completed",

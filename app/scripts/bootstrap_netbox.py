@@ -63,6 +63,12 @@ DEFAULT_TAGS = [
     {"name": "Decommissioned", "slug": "decommissioned", "color": "607d8b", "description": "Workload safely decommissioned, isolated, and powered off"},
 ]
 
+DEFAULT_LXC_TYPES = [
+    {"name": "LXC Micro (1C/1G)", "slug": "lxc-micro", "default_vcpus": 1.0, "default_memory": 1024, "description": "LXC Container Blueprint - 1 vCPU, 1 GB RAM"},
+    {"name": "LXC Standard (2C/2G)", "slug": "lxc-standard", "default_vcpus": 2.0, "default_memory": 2048, "description": "LXC Container Blueprint - 2 vCPUs, 2 GB RAM"},
+    {"name": "LXC Performance (4C/4G)", "slug": "lxc-performance", "default_vcpus": 4.0, "default_memory": 4096, "description": "LXC Container Blueprint - 4 vCPUs, 4 GB RAM"},
+]
+
 
 class NetBoxSanityChecker:
     def __init__(self, netbox_url: str, netbox_token: str, webhook_url: Optional[str] = None, webhook_secret: Optional[str] = None):
@@ -227,17 +233,25 @@ class NetBoxSanityChecker:
                     else:
                         print(f"[✖ OUTDATED] Topology Defaults: Missing {', '.join(topo_missing)} in NetBox")
 
-            # 8. Audit Custom Links
+            # 8. Audit Custom Links & Blueprint Types
             existing_links = await self.get_existing_map("extras/custom-links", "name", client)
             has_link = "Deploy VM Blueprint" in existing_links
             has_kuma_link = "View in Uptime Kuma" in existing_links
             kuma_enabled = module_manager.is_enabled("uptime_kuma") if module_manager else True
+
+            existing_vm_types = await self.get_existing_map("virtualization/virtual-machine-types", "slug", client)
+            missing_lxc_types = [t for t in DEFAULT_LXC_TYPES if t["slug"] not in existing_vm_types]
 
             if not summary_mode:
                 if has_link:
                     print("[✔ OK] 1-Click Deploy Button  : 'Deploy VM Blueprint' active on VM Types")
                 else:
                     print("[✖ OUTDATED] Custom Link      : 'Deploy VM Blueprint' button missing")
+                if not missing_lxc_types:
+                    print(f"[✔ OK] LXC Blueprints         : All {len(DEFAULT_LXC_TYPES)} container blueprints active")
+                else:
+                    names = ", ".join(f"'{t['name']}'" for t in missing_lxc_types)
+                    print(f"[ℹ INFO] LXC Blueprints        : Missing {len(missing_lxc_types)} blueprint(s) -> {names}")
                 if kuma_enabled:
                     if has_kuma_link:
                         print("[✔ OK] Uptime Kuma Link       : 'View in Uptime Kuma' active on Devices & VMs")
@@ -267,7 +281,7 @@ class NetBoxSanityChecker:
 
             # Check if any updates are needed
             needs_kuma_link = kuma_enabled and not has_kuma_link
-            needs_sync = bool(missing_cfs or missing_roles or missing_tags or not has_ctype or not has_link or needs_kuma_link or not has_wh or not has_er)
+            needs_sync = bool(missing_cfs or missing_roles or missing_tags or not has_ctype or not has_link or needs_kuma_link or not has_wh or not has_er or missing_lxc_types)
 
             if summary_mode:
                 if not missing_cfs:
@@ -350,7 +364,7 @@ class NetBoxSanityChecker:
                 link_payload = {
                     "name": "Deploy VM Blueprint",
                     "object_types": ["virtualization.virtualmachinetype"],
-                    "link_text": "🚀 Deploy New VM from this Blueprint",
+                    "link_text": "🚀 Deploy New VM / CT from this Blueprint",
                     "link_url": "https://{{ request.get_host }}/virtualization/virtual-machines/add/?virtual_machine_type={{ object.id }}&status=active",
                     "button_class": "green",
                     "new_window": False,
@@ -358,6 +372,30 @@ class NetBoxSanityChecker:
                 resp = await client.post(f"{self.url}/api/extras/custom-links/", headers=self.headers, json=link_payload)
                 if resp.status_code in (200, 201):
                     print("  ✔ Created Custom Link: Deploy VM Blueprint")
+
+            # Apply missing LXC Blueprint Types
+            if missing_lxc_types:
+                lxc_platform_id = None
+                p_resp = await client.get(f"{self.url}/api/dcim/platforms/?limit=100", headers=self.headers)
+                if p_resp.status_code == 200:
+                    for p in p_resp.json().get("results", []):
+                        if p.get("slug", "").startswith("pve-lxc-") or "lxc" in p.get("slug", "").lower():
+                            lxc_platform_id = p["id"]
+                            break
+
+                for t in missing_lxc_types:
+                    t_payload = {
+                        "name": t["name"],
+                        "slug": t["slug"],
+                        "default_vcpus": t["default_vcpus"],
+                        "default_memory": t["default_memory"],
+                        "description": t["description"],
+                    }
+                    if lxc_platform_id:
+                        t_payload["default_platform"] = lxc_platform_id
+                    t_resp = await client.post(f"{self.url}/api/virtualization/virtual-machine-types/", headers=self.headers, json=t_payload)
+                    if t_resp.status_code in (200, 201):
+                        print(f"  ✔ Created LXC Blueprint Type: {t['name']}")
 
             if kuma_enabled and not has_kuma_link:
                 kuma_link_payload = {

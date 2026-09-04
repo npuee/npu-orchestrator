@@ -10,15 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Configurable Traefik Middleware Matching & Custom Fields Mapping**:
-  - Added `middleware_patterns` in `config.yml` allowing user-defined middleware substrings for detecting IP whitelist and SSO protection without hardcoded middleware names.
-  - Added `custom_fields` mapping in `config.yml` allowing flexible mapping between orchestrator service attributes and NetBox custom field names.
-  - Added `service_tag` configuration option to assign a single clean tag (default `"traefik"`) to all discovered routes, with automatic tag verification and creation in NetBox.
+- **Feature-Grouped Traefik Middleware & Service Field Schema**:
+  - Reorganized Traefik configuration in `config.yml` to feature-grouped `middlewares` (`ip_whitelist`, `sso`), bundling custom field mappings (`netbox_field`) together with their detection substrings (`patterns`).
+  - Added dedicated `service_fields` block to map extracted route attributes (`fqdn`, `public_url`, `middlewares`) directly to NetBox custom field names.
+  - Maintained full backward compatibility with legacy `custom_fields` and `middleware_patterns` mappings.
+- **Multi-Tag Support for Discovered Ingress Routes**:
+  - Enhanced `service_tag` / `service_tags` to support multiple tags via YAML lists, comma-separated strings, or single strings.
+  - Automated NetBox schema bootstrapper and Traefik sync engine now verify, auto-create, and assign all configured tags to discovered application services.
 
 ### Changed
 - **Streamlined Service Tagging**:
-  - Replaced redundant service tags (`SSO`, `NPU Whitelist`, `Public Ingress`) with a single Traefik service tag; protection status is cleanly represented via boolean custom field checkmarks.
-  - NetBox sync reconciliation automatically migrates existing services to the unified service tag.
+  - Replaced legacy redundant service tags (`SSO`, `NPU Whitelist`, `Public Ingress`) with configurable route service tags; security protection status is cleanly represented via boolean custom field checkmarks.
+  - NetBox sync reconciliation automatically updates existing services to match configured tags and custom fields.
 
 ---
 

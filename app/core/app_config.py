@@ -32,16 +32,21 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "traefik": {
         "enabled": True,
         "sync_interval_minutes": 15,
-        "service_tag": "traefik",
-        "middleware_patterns": {
-            "ip_whitelist": ["whitelist", "allowlist", "npu-ip-whitelist"],
-            "sso": ["sso", "forward-auth", "authelia", "authentik", "npu-sso"],
+        "service_tags": ["traefik"],
+        "service_tag": ["traefik"],
+        "middlewares": {
+            "ip_whitelist": {
+                "netbox_field": "ip_whitelist",
+                "patterns": ["whitelist", "allowlist", "npu-ip-whitelist"],
+            },
+            "sso": {
+                "netbox_field": "sso_protected",
+                "patterns": ["sso", "forward-auth", "authelia", "authentik", "npu-sso"],
+            },
         },
-        "custom_fields": {
+        "service_fields": {
             "public_url": "public_url",
             "fqdn": "fqdn",
-            "sso_protected": "sso_protected",
-            "ip_whitelist": "ip_whitelist",
             "middlewares": "middlewares",
         },
         "instances": [

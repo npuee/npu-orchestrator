@@ -49,21 +49,39 @@ DEFAULT_CUSTOM_FIELDS = [
 def get_required_custom_fields() -> List[Dict[str, Any]]:
     """
     Returns all required NetBox custom fields. Dynamically incorporates Application Service
-    (ipam.service) custom fields based on the mappings configured under traefik.custom_fields in config.yml.
+    (ipam.service) custom fields based on the mappings configured under traefik.middlewares and
+    traefik.service_fields (or legacy traefik.custom_fields) in config.yml.
     """
     fields = list(DEFAULT_CUSTOM_FIELDS)
-    cf_map = (app_config.traefik.get("custom_fields") if app_config else None) or {}
+    traefik_cfg = (app_config.traefik if app_config else None) or {}
+    mw_cfg = traefik_cfg.get("middlewares", {})
+    svc_fields = traefik_cfg.get("service_fields", {})
+    legacy_cf = traefik_cfg.get("custom_fields", {})
+
+    field_fqdn = svc_fields.get("fqdn") or legacy_cf.get("fqdn", "fqdn")
+    field_public_url = svc_fields.get("public_url") or legacy_cf.get("public_url", "public_url")
+    field_middlewares = svc_fields.get("middlewares") or legacy_cf.get("middlewares", "middlewares")
+
+    field_sso = (
+        (mw_cfg.get("sso", {}) if isinstance(mw_cfg.get("sso"), dict) else {}).get("netbox_field")
+        or (mw_cfg.get("sso_protected", {}) if isinstance(mw_cfg.get("sso_protected"), dict) else {}).get("netbox_field")
+        or legacy_cf.get("sso_protected", "sso_protected")
+    )
+    field_whitelist = (
+        (mw_cfg.get("ip_whitelist", {}) if isinstance(mw_cfg.get("ip_whitelist"), dict) else {}).get("netbox_field")
+        or (mw_cfg.get("whitelist", {}) if isinstance(mw_cfg.get("whitelist"), dict) else {}).get("netbox_field")
+        or legacy_cf.get("ip_whitelist", "ip_whitelist")
+    )
 
     svc_specs = [
-        ("fqdn", "FQDN / Domain", "text", "Fully Qualified Domain Name or hostname (e.g. media.example.com)"),
-        ("public_url", "Public URL", "url", "Full Public HTTPS/HTTP URL (e.g. https://media.example.com)"),
-        ("sso_protected", "SSO Protected", "boolean", "Protected by Single Sign-On (SSO / ForwardAuth)"),
-        ("ip_whitelist", "IP Whitelist", "boolean", "Restricted to specific IP Whitelist / Allowlist"),
-        ("middlewares", "Middlewares", "text", "Active Traefik Middleware Chain"),
+        (field_fqdn, "fqdn", "FQDN / Domain", "text", "Fully Qualified Domain Name or hostname (e.g. media.example.com)"),
+        (field_public_url, "public_url", "Public URL", "url", "Full Public HTTPS/HTTP URL (e.g. https://media.example.com)"),
+        (field_sso, "sso_protected", "SSO Protected", "boolean", "Protected by Single Sign-On (SSO / ForwardAuth)"),
+        (field_whitelist, "ip_whitelist", "IP Whitelist", "boolean", "Restricted to specific IP Whitelist / Allowlist"),
+        (field_middlewares, "middlewares", "Middlewares", "text", "Active Traefik Middleware Chain"),
     ]
 
-    for default_name, default_label, field_type, description in svc_specs:
-        actual_name = cf_map.get(default_name, default_name)
+    for actual_name, default_name, default_label, field_type, description in svc_specs:
         if actual_name:
             label = default_label
             if actual_name != default_name:
@@ -203,13 +221,33 @@ class NetBoxSanityChecker:
             # 5. Audit Infrastructure Tags
             required_tags = list(DEFAULT_TAGS)
             if app_config:
-                svc_tag = app_config.traefik.get("service_tag")
-                if svc_tag:
-                    import re
-                    t_slug = re.sub(r"[^a-z0-9_-]", "-", str(svc_tag).lower()).strip("-")
-                    t_name = str(svc_tag).replace("-", " ").replace("_", " ").title()
-                    if not any(t["slug"] == t_slug for t in required_tags):
-                        required_tags.append({"name": t_name, "slug": t_slug, "color": "2496ed", "description": "Traefik reverse proxy ingress route"})
+                traefik_cfg = app_config.traefik if app_config else {}
+                if "service_tags" in traefik_cfg:
+                    raw_tags = traefik_cfg.get("service_tags")
+                elif "service_tag" in traefik_cfg:
+                    raw_tags = traefik_cfg.get("service_tag")
+                else:
+                    raw_tags = ["traefik"]
+
+                if raw_tags and raw_tags is not False:
+                    if isinstance(raw_tags, str):
+                        tag_list = [t.strip() for t in raw_tags.split(",") if t.strip()]
+                    elif isinstance(raw_tags, (list, tuple, set)):
+                        tag_list = [str(t).strip() for t in raw_tags if str(t).strip()]
+                    else:
+                        tag_list = [str(raw_tags).strip()]
+
+                    for t_name_raw in tag_list:
+                        import re
+                        t_slug = re.sub(r"[^a-z0-9_-]", "-", t_name_raw.lower()).strip("-")
+                        t_name = t_name_raw.replace("-", " ").replace("_", " ").title()
+                        if t_slug and not any(t["slug"] == t_slug for t in required_tags):
+                            required_tags.append({
+                                "name": t_name,
+                                "slug": t_slug,
+                                "color": "2496ed",
+                                "description": "Traefik reverse proxy ingress route",
+                            })
 
             existing_tags = await self.get_existing_map("extras/tags", "slug", client)
             missing_tags = [t for t in required_tags if t["slug"] not in existing_tags]

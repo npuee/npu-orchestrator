@@ -27,21 +27,37 @@ class TraefikSyncDriver:
     """
 
     def __init__(self):
-        self._cached_service_tag: Optional[List[Dict[str, str]]] = None
+        self._cached_service_tags: Optional[List[Dict[str, str]]] = None
 
     def evaluate_middlewares(self, middlewares: Any) -> Tuple[bool, bool]:
         """
         Evaluates whether the given middlewares match configured patterns for
         ip_whitelist and sso_protected.
-        Configurable via traefik.middleware_patterns in config.yml:
-          middleware_patterns:
-            ip_whitelist: ["whitelist", "allowlist", "npu-ip-whitelist"]
-            sso: ["sso", "forward-auth", "authelia", "authentik", "npu-sso"]
+        Supports Option 2 schema (traefik.middlewares.<name>.patterns) as well as
+        legacy schema (traefik.middleware_patterns.<name>).
         """
         traefik_cfg = app_config.traefik if app_config else {}
-        patterns = traefik_cfg.get("middleware_patterns", {})
-        whitelist_patterns = patterns.get("ip_whitelist") or patterns.get("whitelist") or ["whitelist", "allowlist", "npu-ip-whitelist"]
-        sso_patterns = patterns.get("sso") or patterns.get("sso_protected") or ["sso", "forward-auth", "authelia", "authentik", "npu-sso"]
+        mw_cfg = traefik_cfg.get("middlewares", {})
+
+        # Check Option 2: middlewares.ip_whitelist.patterns / middlewares.whitelist.patterns
+        whitelist_patterns = []
+        if isinstance(mw_cfg.get("ip_whitelist"), dict):
+            whitelist_patterns = mw_cfg["ip_whitelist"].get("patterns", [])
+        elif isinstance(mw_cfg.get("whitelist"), dict):
+            whitelist_patterns = mw_cfg["whitelist"].get("patterns", [])
+        if not whitelist_patterns:
+            legacy_pats = traefik_cfg.get("middleware_patterns", {})
+            whitelist_patterns = legacy_pats.get("ip_whitelist") or legacy_pats.get("whitelist") or ["whitelist", "allowlist", "npu-ip-whitelist"]
+
+        # Check Option 2: middlewares.sso.patterns / middlewares.sso_protected.patterns
+        sso_patterns = []
+        if isinstance(mw_cfg.get("sso"), dict):
+            sso_patterns = mw_cfg["sso"].get("patterns", [])
+        elif isinstance(mw_cfg.get("sso_protected"), dict):
+            sso_patterns = mw_cfg["sso_protected"].get("patterns", [])
+        if not sso_patterns:
+            legacy_pats = traefik_cfg.get("middleware_patterns", {})
+            sso_patterns = legacy_pats.get("sso") or legacy_pats.get("sso_protected") or ["sso", "forward-auth", "authelia", "authentik", "npu-sso"]
 
         if isinstance(middlewares, (list, tuple, set)):
             m_str = " ".join(str(m) for m in middlewares).lower()
@@ -52,64 +68,96 @@ class TraefikSyncDriver:
         is_sso = any(str(pat).lower() in m_str for pat in sso_patterns)
         return is_whitelist, is_sso
 
+    def get_configured_tag_names(self) -> List[str]:
+        """
+        Returns the list of configured service tag strings.
+        Accepts both 'service_tags' and 'service_tag' from config.yml,
+        supporting a single string, comma-separated string, or a YAML list.
+        """
+        traefik_cfg = app_config.traefik if app_config else {}
+        if "service_tags" in traefik_cfg:
+            raw = traefik_cfg.get("service_tags")
+        elif "service_tag" in traefik_cfg:
+            raw = traefik_cfg.get("service_tag")
+        else:
+            raw = ["traefik"]
+
+        if raw is None or raw is False:
+            return []
+
+        if isinstance(raw, str):
+            tags = [t.strip() for t in raw.split(",") if t.strip()]
+        elif isinstance(raw, (list, tuple, set)):
+            tags = [str(t).strip() for t in raw if str(t).strip()]
+        else:
+            tags = [str(raw).strip()]
+        return [t for t in tags if t]
+
     def get_service_tags(self) -> List[Dict[str, str]]:
         """
         Returns the tag list for discovered Traefik services.
-        Defaults to [{"name": "Traefik", "slug": "traefik"}].
-        Configurable via traefik.service_tag in config.yml.
-        If service_tag is null or empty, returns empty list.
+        Supports single or multiple tags configured via service_tags / service_tag in config.yml.
         """
-        if self._cached_service_tag is not None:
-            return self._cached_service_tag
+        if self._cached_service_tags is not None:
+            return self._cached_service_tags
 
-        traefik_cfg = app_config.traefik if app_config else {}
-        tag_val = traefik_cfg.get("service_tag", "traefik")
-        if not tag_val:
+        tag_names = self.get_configured_tag_names()
+        result = []
+        for t in tag_names:
+            slug = re.sub(r"[^a-z0-9_-]", "-", t.lower()).strip("-")
+            name = t.replace("-", " ").replace("_", " ").title()
+            if slug and not any(x["slug"] == slug for x in result):
+                result.append({"name": name, "slug": slug})
+        return result
+
+    async def ensure_service_tags(self, client: httpx.AsyncClient, headers: Dict[str, str]) -> List[Dict[str, str]]:
+        """
+        Verifies that all configured service tags exist in NetBox, creating any missing ones.
+        Returns the canonical list of tag dicts.
+        """
+        tag_names = self.get_configured_tag_names()
+        if not tag_names:
+            self._cached_service_tags = []
             return []
 
-        slug = re.sub(r"[^a-z0-9_-]", "-", str(tag_val).lower()).strip("-")
-        name = str(tag_val).replace("-", " ").replace("_", " ").title()
-        return [{"name": name, "slug": slug}]
+        resolved_tags = []
+        for t in tag_names:
+            slug = re.sub(r"[^a-z0-9_-]", "-", t.lower()).strip("-")
+            display_name = t.replace("-", " ").replace("_", " ").title()
+            if not slug:
+                continue
+
+            try:
+                resp = await client.get(f"{netbox_driver.base_url}/api/extras/tags/?slug={slug}", headers=headers)
+                if resp.status_code == 200 and resp.json().get("results"):
+                    matched = resp.json()["results"][0]
+                    resolved_tags.append({"name": matched["name"], "slug": matched["slug"]})
+                    continue
+
+                # Create missing tag in NetBox
+                create_payload = {
+                    "name": display_name,
+                    "slug": slug,
+                    "color": "2496ed",
+                    "description": "Traefik reverse proxy ingress route",
+                }
+                create_resp = await client.post(f"{netbox_driver.base_url}/api/extras/tags/", headers=headers, json=create_payload)
+                if create_resp.status_code in (200, 201):
+                    res_data = create_resp.json()
+                    resolved_tags.append({"name": res_data.get("name", display_name), "slug": res_data.get("slug", slug)})
+                    logger.info("Created NetBox Tag '%s' (slug: %s)", display_name, slug)
+                else:
+                    resolved_tags.append({"name": display_name, "slug": slug})
+            except Exception as e:
+                logger.warning("Failed to verify/create NetBox tag '%s': %s", slug, e)
+                resolved_tags.append({"name": display_name, "slug": slug})
+
+        self._cached_service_tags = resolved_tags
+        return self._cached_service_tags
 
     async def ensure_service_tag(self, client: httpx.AsyncClient, headers: Dict[str, str]) -> List[Dict[str, str]]:
-        """
-        Verifies that the configured service_tag exists in NetBox, creating it if needed.
-        Caches the resulting tag object for fast reuse.
-        """
-        traefik_cfg = app_config.traefik if app_config else {}
-        tag_val = traefik_cfg.get("service_tag", "traefik")
-        if not tag_val:
-            self._cached_service_tag = []
-            return []
-
-        slug = re.sub(r"[^a-z0-9_-]", "-", str(tag_val).lower()).strip("-")
-        display_name = str(tag_val).replace("-", " ").replace("_", " ").title()
-
-        try:
-            resp = await client.get(f"{netbox_driver.base_url}/api/extras/tags/?slug={slug}", headers=headers)
-            if resp.status_code == 200 and resp.json().get("results"):
-                matched = resp.json()["results"][0]
-                self._cached_service_tag = [{"name": matched["name"], "slug": matched["slug"]}]
-                return self._cached_service_tag
-
-            # Create missing tag in NetBox
-            create_payload = {
-                "name": display_name,
-                "slug": slug,
-                "color": "2496ed",
-                "description": "Traefik reverse proxy ingress route",
-            }
-            create_resp = await client.post(f"{netbox_driver.base_url}/api/extras/tags/", headers=headers, json=create_payload)
-            if create_resp.status_code in (200, 201):
-                res_data = create_resp.json()
-                self._cached_service_tag = [{"name": res_data.get("name", display_name), "slug": res_data.get("slug", slug)}]
-                logger.info("Created NetBox Tag '%s' (slug: %s)", display_name, slug)
-                return self._cached_service_tag
-        except Exception as e:
-            logger.warning("Failed to verify/create NetBox tag '%s': %s", slug, e)
-
-        self._cached_service_tag = [{"name": display_name, "slug": slug}]
-        return self._cached_service_tag
+        """Backwards-compatible alias for ensure_service_tags."""
+        return await self.ensure_service_tags(client, headers)
 
     @staticmethod
     def format_service_name(raw_name: str) -> str:
@@ -482,19 +530,31 @@ class TraefikSyncDriver:
 
             existing_list = resp.json().get("results", [])
                 
-            # Ensure configured service tag exists in NetBox and attach to all routes
-            ensured_tags = await self.ensure_service_tag(client, headers)
+            # Ensure configured service tags exist in NetBox and attach to all routes
+            ensured_tags = await self.ensure_service_tags(client, headers)
             for r in routes:
                 r["tags"] = ensured_tags
 
-            # Load custom fields mapping from config.yml
+            # Load custom fields mapping from config.yml (supporting Option 2 schema and legacy custom_fields)
             traefik_cfg = app_config.traefik if app_config else {}
-            cf_map = traefik_cfg.get("custom_fields", {})
-            field_public_url = cf_map.get("public_url", "public_url")
-            field_fqdn = cf_map.get("fqdn", "fqdn")
-            field_sso = cf_map.get("sso_protected", "sso_protected")
-            field_whitelist = cf_map.get("ip_whitelist", "ip_whitelist")
-            field_middlewares = cf_map.get("middlewares", "middlewares")
+            mw_cfg = traefik_cfg.get("middlewares", {})
+            svc_fields = traefik_cfg.get("service_fields", {})
+            legacy_cf = traefik_cfg.get("custom_fields", {})
+
+            field_public_url = svc_fields.get("public_url") or legacy_cf.get("public_url", "public_url")
+            field_fqdn = svc_fields.get("fqdn") or legacy_cf.get("fqdn", "fqdn")
+            field_middlewares = svc_fields.get("middlewares") or legacy_cf.get("middlewares", "middlewares")
+
+            field_sso = (
+                (mw_cfg.get("sso", {}) if isinstance(mw_cfg.get("sso"), dict) else {}).get("netbox_field")
+                or (mw_cfg.get("sso_protected", {}) if isinstance(mw_cfg.get("sso_protected"), dict) else {}).get("netbox_field")
+                or legacy_cf.get("sso_protected", "sso_protected")
+            )
+            field_whitelist = (
+                (mw_cfg.get("ip_whitelist", {}) if isinstance(mw_cfg.get("ip_whitelist"), dict) else {}).get("netbox_field")
+                or (mw_cfg.get("whitelist", {}) if isinstance(mw_cfg.get("whitelist"), dict) else {}).get("netbox_field")
+                or legacy_cf.get("ip_whitelist", "ip_whitelist")
+            )
 
             existing_by_fqdn = {}
             existing_by_name = {}

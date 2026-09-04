@@ -59,28 +59,33 @@ templates:
 traefik:
   enabled: true
   sync_interval_minutes: 15
-  service_tag: "traefik"            # Single NetBox tag applied to discovered routes (e.g. "traefik" or "traefik-route")
+  service_tag: 
+    - "traefik"                     # NetBox tags applied to discovered routes (accepts a list or single string)
+    # - "ingress"
 
-  # Substrings or middleware names used to detect IP whitelist and SSO protection
-  middleware_patterns:
+  # Feature definitions: bundle pattern detection with target NetBox custom field
+  middlewares:
     ip_whitelist:
-      - "whitelist"
-      - "allowlist"
-      - "private-ip"
-      - "local-only"
+      netbox_field: "ip_whitelist"
+      patterns:
+        - "whitelist"
+        - "allowlist"
+        - "private-ip"
+        - "local-only"
     sso:
-      - "sso"
-      - "forward-auth"
-      - "authelia"
-      - "authentik"
-      - "oauth"
+      netbox_field: "sso_protected"
+      patterns:
+        - "sso"
+        - "forward-auth"
+        - "authelia"
+        - "authentik"
+        - "oauth"
 
-  # NetBox custom field name mapping for ipam.service objects
-  custom_fields:
-    public_url: "public_url"
+  # Target NetBox custom field names for extracted route attributes
+  # Accepted Traefik route attributes: fqdn, public_url, middlewares
+  service_fields:
     fqdn: "fqdn"
-    sso_protected: "sso_protected"
-    ip_whitelist: "ip_whitelist"
+    public_url: "public_url"
     middlewares: "middlewares"
 
   instances:

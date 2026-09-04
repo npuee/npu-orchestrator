@@ -40,8 +40,8 @@ class TraefikSyncDriver:
         """
         traefik_cfg = app_config.traefik if app_config else {}
         patterns = traefik_cfg.get("middleware_patterns", {})
-        whitelist_patterns = patterns.get("ip_whitelist", ["whitelist", "allowlist", "npu-ip-whitelist"])
-        sso_patterns = patterns.get("sso", ["sso", "forward-auth", "authelia", "authentik", "npu-sso"])
+        whitelist_patterns = patterns.get("ip_whitelist") or patterns.get("whitelist") or ["whitelist", "allowlist", "npu-ip-whitelist"]
+        sso_patterns = patterns.get("sso") or patterns.get("sso_protected") or ["sso", "forward-auth", "authelia", "authentik", "npu-sso"]
 
         if isinstance(middlewares, (list, tuple, set)):
             m_str = " ".join(str(m) for m in middlewares).lower()

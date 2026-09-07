@@ -16,6 +16,7 @@ from app.core.app_config import app_config
 from app.core.modules import module_manager
 from app.drivers.netbox import netbox_driver
 from app.drivers.uptime_kuma import uptime_kuma_driver
+from uptime_kuma_api import MonitorType
 
 logging.basicConfig(
     level=logging.INFO,
@@ -107,6 +108,10 @@ async def preview_sync() -> Dict[str, Any]:
     def _preview():
         with uptime_kuma_driver.session() as api:
             monitors = api.get_monitors()
+            groups = {
+                (m.get("name") or "").lower(): m["id"]
+                for m in monitors if m.get("type") == MonitorType.GROUP
+            }
             existing_urls = {
                 (m.get("url") or "").rstrip("/"): m["id"]
                 for m in monitors if m.get("url")
@@ -116,10 +121,19 @@ async def preview_sync() -> Dict[str, Any]:
                 for m in monitors if m.get("name")
             }
 
+            svc_cfg_inner = _get_services_cfg()
+            group_name_key = svc_cfg_inner.get("group_name", "Web Services").strip().lower()
+            group_id = groups.get(group_name_key)
+
+            # Build full NetBox set for orphan detection
+            all_netbox_urls = {svc["url"].rstrip("/") for svc in (monitored + excluded) if svc.get("url")}
+            all_netbox_names = {svc["name"].lower() for svc in (monitored + excluded)}
+
             preview_list = []
             existing_count = 0
             pending_count = 0
             pending_deletions = 0
+            pending_orphan_deletions = 0
 
             for svc in monitored:
                 url = svc["url"].rstrip("/")
@@ -142,13 +156,31 @@ async def preview_sync() -> Dict[str, Any]:
                     status_str = "excluded_ok"
                 preview_list.append({**svc, "monitor_id": mid, "status": status_str})
 
+            # Detect orphans: monitors in the group not in NetBox at all
+            if group_id:
+                for m in monitors:
+                    if m.get("parent") != group_id:
+                        continue
+                    if m.get("type") == MonitorType.GROUP:
+                        continue
+                    m_url = (m.get("url") or "").rstrip("/")
+                    m_name = (m.get("name") or "").lower()
+                    in_netbox = (m_url and m_url in all_netbox_urls) or (m_name and m_name in all_netbox_names)
+                    if not in_netbox:
+                        pending_orphan_deletions += 1
+                        preview_list.append({
+                            "name": m.get("name"), "url": m_url, "monitor_id": m["id"],
+                            "status": "pending_delete (orphan, not in NetBox)"
+                        })
+
             return {
                 "total_services": len(monitored) + len(excluded),
                 "active_candidates": len(monitored),
                 "excluded_services": len(excluded),
                 "already_monitored": existing_count,
                 "pending_provisioning": pending_count,
-                "pending_deletions": pending_deletions,
+                "pending_deletions": pending_deletions + pending_orphan_deletions,
+                "pending_orphan_deletions": pending_orphan_deletions,
                 "services": preview_list,
             }
 
@@ -200,6 +232,8 @@ async def run_sync() -> Dict[str, Any]:
             print(f"{name:<30} {url:<45} {YELLOW}EXISTS  (ID: {mid}){RESET}")
         elif st == "deleted_excluded":
             print(f"{name:<30} {url:<45} {MAGENTA}DELETED (no-monitor){RESET}")
+        elif st == "deleted_orphan":
+            print(f"{name:<30} {url:<45} {MAGENTA}DELETED (orphan, not in NetBox){RESET}")
         elif st == "skipped_no_url":
             print(f"{name:<30} {'(no public_url)':<45} {YELLOW}SKIPPED{RESET}")
         else:

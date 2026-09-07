@@ -136,7 +136,7 @@ class UptimeKumaDriver:
         def _batch_sync():
             with self.session() as api:
                 monitors = api.get_monitors()
-                
+
                 # Fast lookups of existing monitors and groups
                 existing_by_ip: Dict[str, int] = {}
                 existing_by_name: Dict[str, int] = {}
@@ -160,8 +160,8 @@ class UptimeKumaDriver:
 
                 cfg = app_config.uptime_kuma
                 devices_cfg = cfg.get("devices", {})
-                # Support new nested keys; fall back to legacy flat keys
-                group_by_site = devices_cfg.get("group_by_site", cfg.get("group_by_site", True))
+                # group_name: single flat group; fall back to legacy group_by_site behaviour
+                group_name = devices_cfg.get("group_name", cfg.get("group_name", ""))
                 enable_default_notifs = cfg.get("enable_default_notifications", True)
                 ping_interval = devices_cfg.get("ping_interval", cfg.get("ping_interval", 60))
                 ping_retry_interval = devices_cfg.get("ping_retry_interval", cfg.get("ping_retry_interval", 60))
@@ -180,11 +180,64 @@ class UptimeKumaDriver:
                     except Exception as e:
                         logger.warning("Could not fetch notifications from Uptime Kuma: %s", e)
 
+                # Ensure the single group exists
+                parent_id = None
+                if group_name:
+                    group_key = group_name.strip().lower()
+                    if group_key in groups:
+                        parent_id = groups[group_key]
+                    else:
+                        try:
+                            parent_id = self._add_monitor_safe(api, type=MonitorType.GROUP, name=group_name)
+                            groups[group_key] = parent_id
+                            logger.info("Created Uptime Kuma group '%s' (ID: %s)", group_name, parent_id)
+                        except Exception as e:
+                            logger.error("Failed to create group '%s': %s", group_name, e)
+
                 created_count = 0
                 existing_count = 0
                 deleted_count = 0
                 error_count = 0
                 details = []
+
+                # Build lookup sets of ALL NetBox devices (monitored + excluded) to detect orphans
+                all_netbox_ips = {
+                    dev.get("hostname", "").strip().split('/')[0]
+                    for dev in (devices + (excluded_devices or []))
+                    if dev.get("hostname")
+                }
+                all_netbox_names = {
+                    dev["name"].lower()
+                    for dev in (devices + (excluded_devices or []))
+                }
+
+                # PHASE 0: Delete orphaned monitors in the group (no longer in NetBox at all)
+                if parent_id:
+                    for m in monitors:
+                        if m.get("parent") != parent_id:
+                            continue
+                        if m.get("type") == MonitorType.GROUP:
+                            continue
+                        m_id = m["id"]
+                        m_name = (m.get("name") or "").strip()
+                        m_host = (m.get("hostname") or "").strip().split('/')[0]
+                        in_netbox = (
+                            (m_host and m_host in all_netbox_ips)
+                            or (m_name and m_name.lower() in all_netbox_names)
+                        )
+                        if not in_netbox:
+                            try:
+                                api._call("deleteMonitor", m_id)
+                                deleted_count += 1
+                                existing_by_ip.pop(m_host, None)
+                                existing_by_name.pop(m_name.lower(), None)
+                                logger.info("Deleted orphaned Ping monitor '%s' (not in NetBox)", m_name)
+                                details.append({"name": m_name, "ip": m_host, "monitor_id": m_id, "status": "deleted_orphan"})
+                                time.sleep(0.6)
+                            except Exception as e:
+                                error_count += 1
+                                logger.error("Failed to delete orphaned monitor '%s': %s", m_name, e)
+                                details.append({"name": m_name, "ip": m_host, "error": str(e), "status": "error"})
 
                 # PHASE 1: Reconcile Excluded Devices (Delete if exists in Kuma)
                 if excluded_devices:
@@ -193,34 +246,20 @@ class UptimeKumaDriver:
                         ex_ip = ex.get("hostname", "").strip().split('/')[0]
                         site = ex.get("site") or "Default"
                         mid = existing_by_ip.get(ex_ip) or existing_by_name.get(ex_name.lower())
-                        
+
                         if mid:
                             try:
                                 api._call("deleteMonitor", mid)
                                 deleted_count += 1
-                                logger.info("Deleted Uptime Kuma monitor '%s' (ID: %s) because device is tagged as excluded.", ex_name, mid)
-                                details.append({
-                                    "name": ex_name,
-                                    "ip": ex_ip,
-                                    "site": site,
-                                    "monitor_id": mid,
-                                    "status": "deleted_excluded"
-                                })
-                                if ex_ip in existing_by_ip:
-                                    del existing_by_ip[ex_ip]
-                                if ex_name.lower() in existing_by_name:
-                                    del existing_by_name[ex_name.lower()]
+                                logger.info("Deleted Uptime Kuma monitor '%s' (ID: %s) — tagged excluded.", ex_name, mid)
+                                details.append({"name": ex_name, "ip": ex_ip, "site": site, "monitor_id": mid, "status": "deleted_excluded"})
+                                existing_by_ip.pop(ex_ip, None)
+                                existing_by_name.pop(ex_name.lower(), None)
                                 time.sleep(0.6)
                             except Exception as e:
                                 error_count += 1
                                 logger.error("Failed to delete excluded monitor '%s' (ID: %s): %s", ex_name, mid, e)
-                                details.append({
-                                    "name": ex_name,
-                                    "ip": ex_ip,
-                                    "site": site,
-                                    "error": str(e),
-                                    "status": "error"
-                                })
+                                details.append({"name": ex_name, "ip": ex_ip, "site": site, "error": str(e), "status": "error"})
 
                 # PHASE 2: Provision or Reconcile Monitored Devices
                 for dev in devices:
@@ -235,7 +274,7 @@ class UptimeKumaDriver:
                     existing_id = existing_by_ip.get(clean_ip) or existing_by_name.get(name.lower())
                     if existing_id:
                         existing_count += 1
-                        
+
                         # Verify notifications on existing monitor
                         if default_notifs and existing_id in monitor_map:
                             m_obj = monitor_map[existing_id]
@@ -248,37 +287,13 @@ class UptimeKumaDriver:
                                     m_edit["notificationIDList"] = combined
                                     m_edit["conditions"] = m_edit.get("conditions") or "[]"
                                     api._call("editMonitor", m_edit)
-                                    logger.info("Attached missing default notification(s) %s to monitor '%s' (ID: %s)", missing_nids, name, existing_id)
+                                    logger.info("Attached missing notification(s) %s to monitor '%s'", missing_nids, name)
                                     time.sleep(0.4)
                                 except Exception as e:
                                     logger.warning("Failed updating notifications for monitor '%s': %s", name, e)
 
-                        details.append({
-                            "name": name,
-                            "ip": clean_ip,
-                            "site": site,
-                            "monitor_id": existing_id,
-                            "status": "existing"
-                        })
+                        details.append({"name": name, "ip": clean_ip, "site": site, "monitor_id": existing_id, "status": "existing"})
                         continue
-
-                    # Group resolution
-                    parent_id = None
-                    if group_by_site and site:
-                        site_key = site.strip().lower()
-                        if site_key in groups:
-                            parent_id = groups[site_key]
-                        else:
-                            try:
-                                parent_id = self._add_monitor_safe(
-                                    api,
-                                    type=MonitorType.GROUP,
-                                    name=site
-                                )
-                                groups[site_key] = parent_id
-                                logger.info("Created Uptime Kuma group '%s' (ID: %s)", site, parent_id)
-                            except Exception as e:
-                                logger.error("Failed to create group '%s': %s", site, e)
 
                     # Monitor creation
                     kwargs = {
@@ -288,7 +303,7 @@ class UptimeKumaDriver:
                         "interval": ping_interval,
                         "retryInterval": ping_retry_interval,
                         "maxretries": max_retries,
-                        "description": desc
+                        "description": desc,
                     }
                     if parent_id:
                         kwargs["parent"] = parent_id
@@ -300,23 +315,11 @@ class UptimeKumaDriver:
                         created_count += 1
                         existing_by_ip[clean_ip] = mid
                         existing_by_name[name.lower()] = mid
-                        details.append({
-                            "name": name,
-                            "ip": clean_ip,
-                            "site": site,
-                            "monitor_id": mid,
-                            "status": "created"
-                        })
-                        logger.info("Created Ping monitor '%s' (%s) in group '%s' (ID: %s) with notifications %s", name, clean_ip, site, mid, list(default_notifs.keys()))
+                        details.append({"name": name, "ip": clean_ip, "site": site, "monitor_id": mid, "status": "created"})
+                        logger.info("Created Ping monitor '%s' (%s) in group '%s' (ID: %s)", name, clean_ip, group_name, mid)
                     except Exception as e:
                         error_count += 1
-                        details.append({
-                            "name": name,
-                            "ip": clean_ip,
-                            "site": site,
-                            "error": str(e),
-                            "status": "error"
-                        })
+                        details.append({"name": name, "ip": clean_ip, "site": site, "error": str(e), "status": "error"})
                         logger.error("Failed to create monitor '%s' (%s): %s", name, clean_ip, e)
 
                 return {
@@ -423,7 +426,47 @@ class UptimeKumaDriver:
                 error_count = 0
                 details = []
 
-                # PHASE 1: Remove excluded services
+                # Build lookup sets of ALL current NetBox services (monitored + excluded)
+                # so we can detect orphans (monitors in Kuma that no longer exist in NetBox at all)
+                all_netbox_urls = {
+                    svc.get("url", "").rstrip("/")
+                    for svc in (services + (excluded_services or []))
+                    if svc.get("url")
+                }
+                all_netbox_names = {
+                    svc["name"].lower()
+                    for svc in (services + (excluded_services or []))
+                }
+
+                # PHASE 0: Delete orphaned monitors inside the group (no longer in NetBox)
+                if parent_id:
+                    for m in monitors:
+                        if m.get("parent") != parent_id:
+                            continue
+                        if m.get("type") == MonitorType.GROUP:
+                            continue
+                        m_id = m["id"]
+                        m_name = (m.get("name") or "").strip()
+                        m_url = (m.get("url") or "").strip().rstrip("/")
+                        in_netbox = (
+                            (m_url and m_url in all_netbox_urls)
+                            or (m_name and m_name.lower() in all_netbox_names)
+                        )
+                        if not in_netbox:
+                            try:
+                                api._call("deleteMonitor", m_id)
+                                deleted_count += 1
+                                existing_by_url.pop(m_url, None)
+                                existing_by_name.pop(m_name.lower(), None)
+                                logger.info("Deleted orphaned HTTP monitor '%s' (not in NetBox)", m_name)
+                                details.append({"name": m_name, "url": m_url, "monitor_id": m_id, "status": "deleted_orphan"})
+                                time.sleep(0.6)
+                            except Exception as e:
+                                error_count += 1
+                                details.append({"name": m_name, "url": m_url, "error": str(e), "status": "error"})
+                                logger.error("Failed to delete orphaned monitor '%s': %s", m_name, e)
+
+                # PHASE 1: Remove excluded services (tagged no-monitor, clean up if present in Kuma)
                 if excluded_services:
                     for ex in excluded_services:
                         ex_name = ex["name"]

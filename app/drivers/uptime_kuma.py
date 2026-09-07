@@ -90,6 +90,23 @@ class UptimeKumaDriver:
                     continue
                 raise e
 
+    def _edit_monitor_safe(self, api: UptimeKumaApi, id_: int, **kwargs) -> dict:
+        """
+        Safely edits an existing monitor using api.edit_monitor with retry on rate limit.
+        """
+        for attempt in range(5):
+            try:
+                res = api.edit_monitor(id_, **kwargs)
+                time.sleep(0.4)
+                return res
+            except Exception as e:
+                if "Too frequently" in str(e) and attempt < 4:
+                    wait_secs = 5 * (attempt + 1)
+                    logger.warning("Uptime Kuma edit rate limited, waiting %ds...", wait_secs)
+                    time.sleep(wait_secs)
+                    continue
+                raise e
+
     async def test_connection(self) -> Dict[str, Any]:
         """Tests authentication and returns monitor count."""
         def _test():
@@ -196,6 +213,7 @@ class UptimeKumaDriver:
 
                 created_count = 0
                 existing_count = 0
+                moved_count = 0
                 deleted_count = 0
                 error_count = 0
                 details = []
@@ -211,33 +229,37 @@ class UptimeKumaDriver:
                     for dev in (devices + (excluded_devices or []))
                 }
 
-                # PHASE 0: Delete orphaned monitors in the group (no longer in NetBox at all)
-                if parent_id:
-                    for m in monitors:
-                        if m.get("parent") != parent_id:
-                            continue
-                        if m.get("type") == MonitorType.GROUP:
-                            continue
-                        m_id = m["id"]
-                        m_name = (m.get("name") or "").strip()
-                        m_host = (m.get("hostname") or "").strip().split('/')[0]
-                        in_netbox = (
-                            (m_host and m_host in all_netbox_ips)
-                            or (m_name and m_name.lower() in all_netbox_names)
-                        )
-                        if not in_netbox:
-                            try:
-                                api._call("deleteMonitor", m_id)
-                                deleted_count += 1
-                                existing_by_ip.pop(m_host, None)
-                                existing_by_name.pop(m_name.lower(), None)
-                                logger.info("Deleted orphaned Ping monitor '%s' (not in NetBox)", m_name)
-                                details.append({"name": m_name, "ip": m_host, "monitor_id": m_id, "status": "deleted_orphan"})
-                                time.sleep(0.6)
-                            except Exception as e:
-                                error_count += 1
-                                logger.error("Failed to delete orphaned monitor '%s': %s", m_name, e)
-                                details.append({"name": m_name, "ip": m_host, "error": str(e), "status": "error"})
+                svc_group_name = cfg.get("services", {}).get("group_name", "Web Services").strip().lower()
+                svc_group_id = groups.get(svc_group_name)
+
+                # PHASE 0: Delete orphaned Ping monitors (no longer in NetBox at all)
+                for m in monitors:
+                    if m.get("type") != MonitorType.PING:
+                        continue
+                    m_parent = m.get("parent")
+                    # Do not delete monitors belonging to the web services group
+                    if svc_group_id and m_parent == svc_group_id:
+                        continue
+                    m_id = m["id"]
+                    m_name = (m.get("name") or "").strip()
+                    m_host = (m.get("hostname") or "").strip().split('/')[0]
+                    in_netbox = (
+                        (m_host and m_host in all_netbox_ips)
+                        or (m_name and m_name.lower() in all_netbox_names)
+                    )
+                    if not in_netbox:
+                        try:
+                            api._call("deleteMonitor", m_id)
+                            deleted_count += 1
+                            existing_by_ip.pop(m_host, None)
+                            existing_by_name.pop(m_name.lower(), None)
+                            logger.info("Deleted orphaned Ping monitor '%s' (not in NetBox)", m_name)
+                            details.append({"name": m_name, "ip": m_host, "monitor_id": m_id, "status": "deleted_orphan"})
+                            time.sleep(0.5)
+                        except Exception as e:
+                            error_count += 1
+                            logger.error("Failed to delete orphaned monitor '%s': %s", m_name, e)
+                            details.append({"name": m_name, "ip": m_host, "error": str(e), "status": "error"})
 
                 # PHASE 1: Reconcile Excluded Devices (Delete if exists in Kuma)
                 if excluded_devices:
@@ -255,7 +277,7 @@ class UptimeKumaDriver:
                                 details.append({"name": ex_name, "ip": ex_ip, "site": site, "monitor_id": mid, "status": "deleted_excluded"})
                                 existing_by_ip.pop(ex_ip, None)
                                 existing_by_name.pop(ex_name.lower(), None)
-                                time.sleep(0.6)
+                                time.sleep(0.5)
                             except Exception as e:
                                 error_count += 1
                                 logger.error("Failed to delete excluded monitor '%s' (ID: %s): %s", ex_name, mid, e)
@@ -274,25 +296,39 @@ class UptimeKumaDriver:
                     existing_id = existing_by_ip.get(clean_ip) or existing_by_name.get(name.lower())
                     if existing_id:
                         existing_count += 1
+                        was_moved = False
 
-                        # Verify notifications on existing monitor
-                        if default_notifs and existing_id in monitor_map:
+                        # Reconcile parent group and default notifications on existing monitor
+                        if existing_id in monitor_map:
                             m_obj = monitor_map[existing_id]
-                            cur_notifs = m_obj.get("notificationIDList") or []
-                            missing_nids = [nid for nid in default_notifs if nid not in cur_notifs]
-                            if missing_nids:
-                                try:
-                                    m_edit = dict(m_obj)
-                                    combined = {nid: True for nid in (cur_notifs + missing_nids)}
-                                    m_edit["notificationIDList"] = combined
-                                    m_edit["conditions"] = m_edit.get("conditions") or "[]"
-                                    api._call("editMonitor", m_edit)
-                                    logger.info("Attached missing notification(s) %s to monitor '%s'", missing_nids, name)
-                                    time.sleep(0.4)
-                                except Exception as e:
-                                    logger.warning("Failed updating notifications for monitor '%s': %s", name, e)
+                            edit_kwargs = {}
 
-                        details.append({"name": name, "ip": clean_ip, "site": site, "monitor_id": existing_id, "status": "existing"})
+                            # Move monitor into target group if it's currently under an old/different group
+                            if parent_id and m_obj.get("parent") != parent_id:
+                                edit_kwargs["parent"] = parent_id
+                                was_moved = True
+
+                            # Verify notifications on existing monitor
+                            if default_notifs:
+                                cur_notifs = m_obj.get("notificationIDList") or []
+                                missing = any(nid not in cur_notifs for nid in default_notifs)
+                                if missing:
+                                    edit_kwargs["notificationIDList"] = default_notifs
+
+                            if edit_kwargs:
+                                try:
+                                    self._edit_monitor_safe(api, existing_id, **edit_kwargs)
+                                    m_obj.update(edit_kwargs)
+                                    if was_moved:
+                                        moved_count += 1
+                                        logger.info("Moved monitor '%s' (ID: %s) to group '%s' (ID: %s)", name, existing_id, group_name, parent_id)
+                                    else:
+                                        logger.info("Updated notification(s) for monitor '%s' (ID: %s)", name, existing_id)
+                                except Exception as e:
+                                    logger.warning("Failed updating monitor '%s' (ID: %s): %s", name, existing_id, e)
+
+                        status_str = "moved" if was_moved else "existing"
+                        details.append({"name": name, "ip": clean_ip, "site": site, "monitor_id": existing_id, "status": status_str})
                         continue
 
                     # Monitor creation
@@ -322,11 +358,36 @@ class UptimeKumaDriver:
                         details.append({"name": name, "ip": clean_ip, "site": site, "error": str(e), "status": "error"})
                         logger.error("Failed to create monitor '%s' (%s): %s", name, clean_ip, e)
 
+                # PHASE 3: Clean up obsolete empty groups (e.g. legacy per-site groups like Hulja, Lohusuu, Oracle)
+                protected_groups = set()
+                if parent_id:
+                    protected_groups.add(parent_id)
+                if svc_group_id:
+                    protected_groups.add(svc_group_id)
+
+                try:
+                    current_monitors = api.get_monitors()
+                    for gm in current_monitors:
+                        if gm.get("type") != MonitorType.GROUP:
+                            continue
+                        gid = gm["id"]
+                        if gid in protected_groups:
+                            continue
+                        # Count how many child monitors still reference this group as parent
+                        children_count = sum(1 for m in current_monitors if m.get("parent") == gid)
+                        if children_count == 0:
+                            api._call("deleteMonitor", gid)
+                            logger.info("Deleted obsolete empty group '%s' (ID: %s)", gm.get("name"), gid)
+                            time.sleep(0.5)
+                except Exception as e:
+                    logger.warning("Could not clean up obsolete empty groups: %s", e)
+
                 return {
                     "status": "success" if error_count == 0 else "partial",
                     "total_evaluated": len(devices) + (len(excluded_devices) if excluded_devices else 0),
                     "created_count": created_count,
                     "existing_count": existing_count,
+                    "moved_count": moved_count,
                     "deleted_count": deleted_count,
                     "error_count": error_count,
                     "details": details
@@ -499,6 +560,14 @@ class UptimeKumaDriver:
                     existing_id = existing_by_url.get(url) or existing_by_name.get(name.lower())
                     if existing_id:
                         existing_count += 1
+                        m_obj = monitor_map.get(existing_id)
+                        if m_obj and parent_id and m_obj.get("parent") != parent_id:
+                            try:
+                                self._edit_monitor_safe(api, existing_id, parent=parent_id)
+                                m_obj["parent"] = parent_id
+                                logger.info("Moved HTTP monitor '%s' (ID: %s) to group '%s'", name, existing_id, group_name)
+                            except Exception as e:
+                                logger.warning("Failed moving HTTP monitor '%s' to group: %s", name, e)
                         details.append({"name": name, "url": url, "monitor_id": existing_id, "status": "existing"})
                         continue
 

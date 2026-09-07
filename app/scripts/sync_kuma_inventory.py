@@ -225,6 +225,16 @@ async def run_sync() -> Dict[str, Any]:
                 except Exception as e:
                     logger.warning("Could not set kuma_monitor_id on NetBox device '%s': %s", name, e)
 
+        elif st == "moved":
+            print(f"{site:<12} {name:<25} {ip:<16} {CYAN}MOVED   (ID: {mid}){RESET}")
+            # Ensure NetBox custom field is populated
+            dev = monitored_map.get(name)
+            if dev and dev.get("kuma_monitor_id") != mid:
+                try:
+                    await client.patch(f"{netbox_driver.base_url}/api/dcim/devices/{dev['id']}/", headers=headers, json={"custom_fields": {"kuma_monitor_id": mid}})
+                except Exception as e:
+                    logger.warning("Could not set kuma_monitor_id on NetBox device '%s': %s", name, e)
+
         elif st == "existing":
             print(f"{site:<12} {name:<25} {ip:<16} {YELLOW}EXISTS  (ID: {mid}){RESET}")
             # Ensure NetBox custom field is populated
@@ -245,6 +255,9 @@ async def run_sync() -> Dict[str, Any]:
                 except Exception as e:
                     logger.warning("Could not clear kuma_monitor_id on NetBox device '%s': %s", name, e)
 
+        elif st == "deleted_orphan":
+            print(f"{site:<12} {name:<25} {ip:<16} {MAGENTA}DELETED (orphan, not in NetBox){RESET}")
+
         else:
             err = item.get("error", "Unknown error")
             print(f"{site:<12} {name:<25} {ip:<16} {RED}ERROR: {err}{RESET}")
@@ -253,9 +266,11 @@ async def run_sync() -> Dict[str, Any]:
     print(f"{BOLD}Sync Complete!{RESET}")
     print(f"  Total Monitored:   {len(monitored_devices)}")
     print(f"  {GREEN}Newly Provisioned: {res.get('created_count', 0)}{RESET}")
+    if res.get('moved_count', 0) > 0:
+        print(f"  {CYAN}Moved to Group:    {res.get('moved_count', 0)}{RESET}")
     print(f"  {YELLOW}Already Existed:   {res.get('existing_count', 0)}{RESET}")
     if res.get('deleted_count', 0) > 0:
-        print(f"  {MAGENTA}Removed (Tags):    {res.get('deleted_count', 0)}{RESET}")
+        print(f"  {MAGENTA}Removed:           {res.get('deleted_count', 0)}{RESET}")
     if res.get('error_count', 0) > 0:
         print(f"  {RED}Errors:            {res.get('error_count', 0)}{RESET}")
     print("=" * 65 + "\n")

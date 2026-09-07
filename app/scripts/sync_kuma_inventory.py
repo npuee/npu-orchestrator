@@ -215,8 +215,11 @@ async def run_sync() -> Dict[str, Any]:
         st = item.get("status")
         mid = item.get("monitor_id")
 
+        grp = item.get("group", "")
+        grp_str = f" [{grp}]" if grp else ""
+
         if st == "created":
-            print(f"{site:<12} {name:<25} {ip:<16} {GREEN}CREATED (ID: {mid}){RESET}")
+            print(f"{site:<12} {name:<25} {ip:<16} {GREEN}CREATED (ID: {mid}){grp_str}{RESET}")
             # Update NetBox custom field if needed
             dev = monitored_map.get(name)
             if dev and dev.get("kuma_monitor_id") != mid:
@@ -226,7 +229,7 @@ async def run_sync() -> Dict[str, Any]:
                     logger.warning("Could not set kuma_monitor_id on NetBox device '%s': %s", name, e)
 
         elif st == "moved":
-            print(f"{site:<12} {name:<25} {ip:<16} {CYAN}MOVED   (ID: {mid}){RESET}")
+            print(f"{site:<12} {name:<25} {ip:<16} {CYAN}MOVED   (ID: {mid}){grp_str}{RESET}")
             # Ensure NetBox custom field is populated
             dev = monitored_map.get(name)
             if dev and dev.get("kuma_monitor_id") != mid:
@@ -236,7 +239,7 @@ async def run_sync() -> Dict[str, Any]:
                     logger.warning("Could not set kuma_monitor_id on NetBox device '%s': %s", name, e)
 
         elif st == "existing":
-            print(f"{site:<12} {name:<25} {ip:<16} {YELLOW}EXISTS  (ID: {mid}){RESET}")
+            print(f"{site:<12} {name:<25} {ip:<16} {YELLOW}EXISTS  (ID: {mid}){grp_str}{RESET}")
             # Ensure NetBox custom field is populated
             dev = monitored_map.get(name)
             if dev and dev.get("kuma_monitor_id") != mid:

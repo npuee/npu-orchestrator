@@ -177,8 +177,9 @@ class UptimeKumaDriver:
 
                 cfg = app_config.uptime_kuma
                 devices_cfg = cfg.get("devices", {})
-                # group_name: single flat group; fall back to legacy group_by_site behaviour
-                group_name = devices_cfg.get("group_name", cfg.get("group_name", ""))
+                group_by_site = devices_cfg.get("group_by_site", cfg.get("group_by_site", True))
+                group_prefix = devices_cfg.get("group_prefix", "Infra: ")
+                fallback_group_name = devices_cfg.get("group_name", cfg.get("group_name", "Infrastructure"))
                 enable_default_notifs = cfg.get("enable_default_notifications", True)
                 ping_interval = devices_cfg.get("ping_interval", cfg.get("ping_interval", 60))
                 ping_retry_interval = devices_cfg.get("ping_retry_interval", cfg.get("ping_retry_interval", 60))
@@ -197,19 +198,20 @@ class UptimeKumaDriver:
                     except Exception as e:
                         logger.warning("Could not fetch notifications from Uptime Kuma: %s", e)
 
-                # Ensure the single group exists
-                parent_id = None
-                if group_name:
-                    group_key = group_name.strip().lower()
-                    if group_key in groups:
-                        parent_id = groups[group_key]
-                    else:
-                        try:
-                            parent_id = self._add_monitor_safe(api, type=MonitorType.GROUP, name=group_name)
-                            groups[group_key] = parent_id
-                            logger.info("Created Uptime Kuma group '%s' (ID: %s)", group_name, parent_id)
-                        except Exception as e:
-                            logger.error("Failed to create group '%s': %s", group_name, e)
+                active_group_ids = set()
+
+                def _get_or_create_group(name: str) -> Optional[int]:
+                    key = name.strip().lower()
+                    if key in groups:
+                        return groups[key]
+                    try:
+                        gid = self._add_monitor_safe(api, type=MonitorType.GROUP, name=name)
+                        groups[key] = gid
+                        logger.info("Created Uptime Kuma group '%s' (ID: %s)", name, gid)
+                        return gid
+                    except Exception as e:
+                        logger.error("Failed to create group '%s': %s", name, e)
+                        return None
 
                 created_count = 0
                 existing_count = 0
@@ -292,6 +294,16 @@ class UptimeKumaDriver:
                     role = dev.get("role") or "Device"
                     desc = dev.get("description") or f"Managed by NPU Orchestrator. Site: {site}, Role: {role}"
 
+                    # Determine target group for this device
+                    if group_by_site:
+                        target_group_name = f"{group_prefix}{site}".strip()
+                    else:
+                        target_group_name = fallback_group_name.strip()
+
+                    target_parent_id = _get_or_create_group(target_group_name)
+                    if target_parent_id:
+                        active_group_ids.add(target_parent_id)
+
                     # Check if already monitored
                     existing_id = existing_by_ip.get(clean_ip) or existing_by_name.get(name.lower())
                     if existing_id:
@@ -304,8 +316,8 @@ class UptimeKumaDriver:
                             edit_kwargs = {}
 
                             # Move monitor into target group if it's currently under an old/different group
-                            if parent_id and m_obj.get("parent") != parent_id:
-                                edit_kwargs["parent"] = parent_id
+                            if target_parent_id and m_obj.get("parent") != target_parent_id:
+                                edit_kwargs["parent"] = target_parent_id
                                 was_moved = True
 
                             # Verify notifications on existing monitor
@@ -321,14 +333,14 @@ class UptimeKumaDriver:
                                     m_obj.update(edit_kwargs)
                                     if was_moved:
                                         moved_count += 1
-                                        logger.info("Moved monitor '%s' (ID: %s) to group '%s' (ID: %s)", name, existing_id, group_name, parent_id)
+                                        logger.info("Moved monitor '%s' (ID: %s) to group '%s' (ID: %s)", name, existing_id, target_group_name, target_parent_id)
                                     else:
                                         logger.info("Updated notification(s) for monitor '%s' (ID: %s)", name, existing_id)
                                 except Exception as e:
                                     logger.warning("Failed updating monitor '%s' (ID: %s): %s", name, existing_id, e)
 
                         status_str = "moved" if was_moved else "existing"
-                        details.append({"name": name, "ip": clean_ip, "site": site, "monitor_id": existing_id, "status": status_str})
+                        details.append({"name": name, "ip": clean_ip, "site": site, "monitor_id": existing_id, "status": status_str, "group": target_group_name})
                         continue
 
                     # Monitor creation
@@ -341,8 +353,8 @@ class UptimeKumaDriver:
                         "maxretries": max_retries,
                         "description": desc,
                     }
-                    if parent_id:
-                        kwargs["parent"] = parent_id
+                    if target_parent_id:
+                        kwargs["parent"] = target_parent_id
                     if default_notifs:
                         kwargs["notificationIDList"] = default_notifs
 
@@ -351,17 +363,15 @@ class UptimeKumaDriver:
                         created_count += 1
                         existing_by_ip[clean_ip] = mid
                         existing_by_name[name.lower()] = mid
-                        details.append({"name": name, "ip": clean_ip, "site": site, "monitor_id": mid, "status": "created"})
-                        logger.info("Created Ping monitor '%s' (%s) in group '%s' (ID: %s)", name, clean_ip, group_name, mid)
+                        details.append({"name": name, "ip": clean_ip, "site": site, "monitor_id": mid, "status": "created", "group": target_group_name})
+                        logger.info("Created Ping monitor '%s' (%s) in group '%s' (ID: %s)", name, clean_ip, target_group_name, mid)
                     except Exception as e:
                         error_count += 1
-                        details.append({"name": name, "ip": clean_ip, "site": site, "error": str(e), "status": "error"})
+                        details.append({"name": name, "ip": clean_ip, "site": site, "error": str(e), "status": "error", "group": target_group_name})
                         logger.error("Failed to create monitor '%s' (%s): %s", name, clean_ip, e)
 
-                # PHASE 3: Clean up obsolete empty groups (e.g. legacy per-site groups like Hulja, Lohusuu, Oracle)
-                protected_groups = set()
-                if parent_id:
-                    protected_groups.add(parent_id)
+                # PHASE 3: Clean up obsolete empty groups (e.g. empty legacy groups or old Infrastructure flat group)
+                protected_groups = set(active_group_ids)
                 if svc_group_id:
                     protected_groups.add(svc_group_id)
 

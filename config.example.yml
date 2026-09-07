@@ -139,7 +139,9 @@ uptime_kuma:
   devices:
     sync_interval_minutes: 30     # Frequency of NetBox -> Uptime Kuma reconciliation
     exclude_tag: "no-monitor"     # NetBox tag that excludes a device from monitoring
-    group_name: "Infrastructure"  # Uptime Kuma group for all device/VM ping monitors
+    group_by_site: true           # Group monitors into per-site folders
+    group_prefix: "Infra: "       # Prefix for site group folders (e.g. "Infra: Hulja")
+    group_name: "Infrastructure"  # Fallback group name if group_by_site is false
     ping_interval: 60             # Heartbeat check interval in seconds
     ping_retry_interval: 60       # Retry interval when a check fails
     max_retries: 3                # Failures before marking monitor DOWN

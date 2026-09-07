@@ -82,6 +82,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "devices": {
             "sync_interval_minutes": 30,
             "exclude_tag": "no-monitor",
+            "group_by_site": True,
+            "group_prefix": "Infra: ",
             "group_name": "Infrastructure",
             "ping_interval": 60,
             "ping_retry_interval": 60,

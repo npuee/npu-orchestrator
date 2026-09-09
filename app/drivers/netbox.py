@@ -35,6 +35,28 @@ class NetBoxDriver:
             await self._client.aclose()
             self._client = None
 
+    async def get_virtual_machine(self, vm_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Fetches a NetBox VirtualMachine by ID.
+        """
+        if not self.is_configured():
+            return None
+
+        headers = {
+            "Authorization": f"Token {self.token}",
+            "Accept": "application/json",
+        }
+        url = f"{self.base_url}/api/virtualization/virtual-machines/{vm_id}/"
+        try:
+            client = self._get_client()
+            resp = await client.get(url, headers=headers)
+            if resp.status_code == 200:
+                return resp.json()
+            logger.warning("Failed to fetch NetBox VM ID %d: HTTP %d %s", vm_id, resp.status_code, resp.text)
+        except Exception as e:
+            logger.error("Exception fetching NetBox VM %d: %s", vm_id, e)
+        return None
+
     async def update_virtual_machine(
         self,
         vm_id: int,
@@ -48,9 +70,10 @@ class NetBoxDriver:
         vcpus: Optional[int] = None,
         memory: Optional[int] = None,
         role: Optional[int] = None,
+        tags: Optional[List[Any]] = None,
     ) -> bool:
         """
-        Updates a NetBox VirtualMachine record (e.g., setting status, start_on_boot, custom fields, tenant, site, cluster, vcpus, memory, role).
+        Updates a NetBox VirtualMachine record (e.g., setting status, start_on_boot, custom fields, tenant, site, cluster, vcpus, memory, role, tags).
         """
         if not self.is_configured():
             logger.debug("NetBox integration not configured, skipping status update")
@@ -82,6 +105,8 @@ class NetBoxDriver:
             payload["memory"] = memory
         if role is not None:
             payload["role"] = role
+        if tags is not None:
+            payload["tags"] = tags
 
         url = f"{self.base_url}/api/virtualization/virtual-machines/{vm_id}/"
         
@@ -102,10 +127,17 @@ class NetBoxDriver:
             logger.error("Exception updating NetBox VM %d: %s", vm_id, e)
             return False
 
-    async def add_journal_entry(self, assigned_object_type: str, assigned_object_id: int, comment: str) -> bool:
+    async def add_journal_entry(
+        self,
+        assigned_object_type: str,
+        assigned_object_id: int,
+        comment: str,
+        check_duplicate: bool = True,
+    ) -> bool:
         """
         Adds an audit journal entry to a NetBox object.
         assigned_object_type: e.g. "virtualization.virtualmachine"
+        check_duplicate: if True, checks recent journal entries to avoid spamming duplicate comments
         """
         if not self.is_configured():
             return False
@@ -115,6 +147,34 @@ class NetBoxDriver:
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+        client = self._get_client()
+
+        if check_duplicate:
+            try:
+                # Check recent 3 journal entries for duplicate content
+                q_url = (
+                    f"{self.base_url}/api/extras/journal-entries/"
+                    f"?assigned_object_type={assigned_object_type}"
+                    f"&assigned_object_id={assigned_object_id}&limit=3"
+                )
+                q_resp = await client.get(q_url, headers=headers)
+                if q_resp.status_code == 200:
+                    entries = q_resp.json().get("results", [])
+                    clean_comment = comment.split("(Job ID:")[0].strip() if "(Job ID:" in comment else comment.strip()
+                    for entry in entries:
+                        existing_comment = (entry.get("comments") or "").strip()
+                        existing_clean = existing_comment.split("(Job ID:")[0].strip() if "(Job ID:" in existing_comment else existing_comment
+                        if clean_comment and clean_comment == existing_clean:
+                            logger.info(
+                                "Skipping duplicate journal entry for %s #%d: '%s'",
+                                assigned_object_type,
+                                assigned_object_id,
+                                clean_comment,
+                            )
+                            return True
+            except Exception as e:
+                logger.debug("Could not verify duplicate journal entry: %s", e)
+
         payload = {
             "assigned_object_type": assigned_object_type,
             "assigned_object_id": assigned_object_id,
@@ -124,11 +184,10 @@ class NetBoxDriver:
         url = f"{self.base_url}/api/extras/journal-entries/"
 
         try:
-            client = self._get_client()
             resp = await client.post(url, headers=headers, json=payload)
             return resp.status_code in (200, 201)
         except Exception as e:
-            logger.warning("Could not create NetBox journal entry: %s", e)
+            logger.error("Failed to post journal entry: %s", e)
             return False
 
     async def ensure_vm_interface_and_ip(

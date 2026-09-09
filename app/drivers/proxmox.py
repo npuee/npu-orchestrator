@@ -94,6 +94,18 @@ class ProxmoxDriver:
 
         return settings.PROXMOX_DEFAULT_NODE or "pve"
 
+    @staticmethod
+    def _set_config(client_obj, is_lxc: bool, **params):
+        """
+        Updates VM/CT configuration.
+        Proxmox VE API uses PUT for LXC containers (/nodes/{node}/lxc/{vmid}/config)
+        and POST for QEMU VMs (/nodes/{node}/qemu/{vmid}/config). Calling POST on LXC returns 501 Not Implemented.
+        """
+        if is_lxc:
+            return client_obj.config.put(**params)
+        else:
+            return client_obj.config.post(**params)
+
     def find_vm_by_name(self, hostname: str) -> Optional[Dict[str, Any]]:
         """
         Searches the Proxmox VE cluster for any existing QEMU VM or LXC container
@@ -992,7 +1004,7 @@ class ProxmoxDriver:
 
         # 6. Apply updates if any changes detected
         if updates:
-            client_obj.config.post(**updates)
+            self._set_config(client_obj, is_lxc, **updates)
 
         has_changes = bool(updates or disk_resized)
         return {
@@ -1045,7 +1057,7 @@ class ProxmoxDriver:
             # Update onboot on start
             target_onboot = 1 if desired_onboot is not False else 0
             try:
-                client_obj.config.post(onboot=target_onboot)
+                self._set_config(client_obj, is_lxc, onboot=target_onboot)
                 if log_callback:
                     log_callback(f"Start on Boot set to {'enabled (1)' if target_onboot == 1 else 'disabled (0)'}.")
             except Exception as exc:
@@ -1080,7 +1092,7 @@ class ProxmoxDriver:
             if current_status == "stopped":
                 # Ensure onboot=0 is set even if already stopped
                 try:
-                    client_obj.config.post(onboot=0)
+                    self._set_config(client_obj, is_lxc, onboot=0)
                 except Exception:
                     pass
                 if log_callback:
@@ -1115,7 +1127,7 @@ class ProxmoxDriver:
             # Set onboot=0 now that the VM is stopped and unlocked
             try:
                 time.sleep(1)
-                client_obj.config.post(onboot=0)
+                self._set_config(client_obj, is_lxc, onboot=0)
                 if log_callback:
                     log_callback("Disabled Start on Boot (onboot=0) to ensure VM remains off across host reboots.")
             except Exception as exc:
@@ -1218,7 +1230,7 @@ class ProxmoxDriver:
             audit_note = f"\n\n[QUARANTINED / DECOMMISSIONED by Orchestrator on {timestamp_str}]\nDisks preserved. Networking disabled."
             updates["description"] = existing_desc + audit_note
 
-            client_obj.config.post(**updates)
+            self._set_config(client_obj, is_lxc, **updates)
             if log_callback:
                 log_callback(f"Successfully quarantined VM/CT {vmid} on node '{target_node}'. Disks and storage remain intact.")
 

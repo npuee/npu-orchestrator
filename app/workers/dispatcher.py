@@ -20,6 +20,7 @@ from app.workers.lifecycle import (
     run_vm_sync_task,
     _active_decommissioning_vms,
     _active_power_sync_vms,
+    is_recently_decommissioned,
 )
 
 logger = logging.getLogger("orchestrator.workers.dispatcher")
@@ -59,6 +60,10 @@ async def process_netbox_webhook_event(job_id: str, payload: Dict[str, Any]):
 
     custom_fields = data.get("custom_fields", {})
     existing_vmid = custom_fields.get("proxmox_vmid")
+    tag_slugs = {
+        (t.get("slug") or t.get("name", "")).lower() if isinstance(t, dict) else str(t).lower()
+        for t in data.get("tags", [])
+    }
 
     # Guard 1: Strict Cluster ID Matching
     # If the VM has an assigned cluster, verify it matches our Proxmox cluster ID in config.yml
@@ -121,6 +126,37 @@ async def process_netbox_webhook_event(job_id: str, payload: Dict[str, Any]):
             await db.append_log(job_id, f"Decommissioning VM '{hostname}' has no Proxmox VMID. Skipping Proxmox quarantine.")
             await db.update_job(job_id, status="completed")
             return
+
+        # Guard A: Already tagged as decommissioned
+        if "decommissioned" in tag_slugs:
+            await db.append_log(
+                job_id,
+                f"VM '{hostname}' is already tagged as 'decommissioned'. Skipping redundant decommission workflow.",
+            )
+            await db.update_job(job_id, status="completed")
+            return
+
+        # Guard B: Check debounce cache (prevents echo webhooks from triggering within debounce window)
+        if is_recently_decommissioned(int(existing_vmid)):
+            await db.append_log(
+                job_id,
+                f"VM '{hostname}' (VMID {existing_vmid}) was quarantined within the debounce window. Skipping echo webhook.",
+            )
+            await db.update_job(job_id, status="completed")
+            return
+
+        # Guard C: Snapshot verification (only trigger if status transitioned TO decommissioning)
+        snapshots = payload.get("snapshots") or {}
+        pre_status_data = snapshots.get("prechange", {}).get("status") if isinstance(snapshots.get("prechange"), dict) else None
+        if pre_status_data is not None:
+            pre_val = (pre_status_data.get("value") if isinstance(pre_status_data, dict) else str(pre_status_data)).lower()
+            if pre_val in ("decommissioning", "deprovisioning"):
+                await db.append_log(
+                    job_id,
+                    f"VM '{hostname}' pre-change status was already '{pre_val}'. Status did not transition to decommissioning in this event. Skipping.",
+                )
+                await db.update_job(job_id, status="completed")
+                return
 
         await db.append_log(
             job_id,
@@ -260,9 +296,9 @@ async def process_netbox_webhook_event(job_id: str, payload: Dict[str, Any]):
         )
         return
 
-    # Guard: do NOT provision VMs that are in offline, failed, or decommissioning status
-    if status_val.lower() in ("offline", "failed", "decommissioning", "decommissioned"):
-        await db.append_log(job_id, f"VM '{hostname}' is in status '{status_val}'. Skipping automatic provisioning.")
+    # Guard: do NOT provision VMs that are in offline, failed, or decommissioning status, or tagged decommissioned
+    if status_val.lower() in ("offline", "failed", "decommissioning", "decommissioned") or "decommissioned" in tag_slugs:
+        await db.append_log(job_id, f"VM '{hostname}' is in status '{status_val}' (tags: {list(tag_slugs)}). Skipping automatic provisioning.")
         await db.update_job(job_id, status="completed")
         return
 

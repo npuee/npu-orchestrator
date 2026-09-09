@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from typing import Dict, Any, Optional
 
 from app.core.config import settings
@@ -14,6 +15,13 @@ logger = logging.getLogger("orchestrator.workers.lifecycle")
 # Concurrency locks for in-flight lifecycle operations
 _active_decommissioning_vms = set()
 _active_power_sync_vms = set()
+_recently_decommissioned_vms: Dict[int, float] = {}
+
+
+def is_recently_decommissioned(vmid: int, window_seconds: float = 120.0) -> bool:
+    """Returns True if the given VMID was successfully decommissioned/quarantined within window_seconds."""
+    last_ts = _recently_decommissioned_vms.get(vmid, 0.0)
+    return (time.time() - last_ts) < window_seconds
 
 async def run_power_sync_task(
     job_id: str,
@@ -157,9 +165,21 @@ async def run_decommission_task(
                     comment=f"VM was permanently purged from Proxmox node '{result.get('node')}'. DNS and IP records removed. (Job ID: {job_id})",
                 )
             else:
+                vm_tags = [{"slug": "decommissioned"}]
+                if netbox_vm_id:
+                    nb_vm = await netbox_driver.get_virtual_machine(netbox_vm_id)
+                    if nb_vm and "tags" in nb_vm:
+                        existing_slugs = {
+                            t.get("slug") if isinstance(t, dict) else str(t)
+                            for t in nb_vm.get("tags", [])
+                        }
+                        existing_slugs.add("decommissioned")
+                        vm_tags = [{"slug": s} for s in existing_slugs if s]
+
                 await netbox_driver.update_virtual_machine(
                     vm_id=netbox_vm_id,
                     status="decommissioning",
+                    tags=vm_tags,
                     start_on_boot="off",
                     comments=f"Safely decommissioned & quarantined on Proxmox (Disks intact, VMID: {vmid}, Job ID: {job_id})",
                 )
@@ -168,6 +188,8 @@ async def run_decommission_task(
                     assigned_object_id=netbox_vm_id,
                     comment=f"VM was safely decommissioned: powered off, start-on-boot disabled, network isolated, and tagged 'decommissioned' on Proxmox node '{result.get('node')}'. Storage and disks remain intact for recovery. (Job ID: {job_id})",
                 )
+
+        _recently_decommissioned_vms[vmid] = time.time()
 
         await db.update_job(
             job_id,

@@ -747,7 +747,7 @@ class ProxmoxDriver:
                 log_callback("Configured root password for container console access.")
 
         if resolved_ssh:
-            lxc_params["ssh-public-keys"] = urllib.parse.quote(resolved_ssh, safe="")
+            lxc_params["ssh-public-keys"] = resolved_ssh
             if log_callback:
                 log_callback("Attached SSH public key(s) to LXC container.")
 

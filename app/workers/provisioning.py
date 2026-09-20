@@ -185,6 +185,7 @@ async def run_windows_provision_task(
                 cores=params.get("cores", 4),
                 memory_mb=params.get("memory_mb", 8192),
                 balloon_mb=params.get("balloon_mb", 512),
+                onboot=params.get("onboot", True),
                 storage=params.get("storage"),
                 bridge=params.get("bridge"),
                 start_on_create=params.get("start_on_create", True),

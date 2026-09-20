@@ -213,7 +213,7 @@ class TemplateSyncDriver:
         # Fetch existing NetBox platforms
         existing_platforms = await netbox_driver.get_platforms()
         platform_by_slug = {p["slug"]: p for p in existing_platforms}
-        platform_by_name = {p["name"].lower(): p for p in existing_platforms}
+        platform_by_name = {p["name"].replace("[Deprecated] ", "").strip().lower(): p for p in existing_platforms}
 
         # Map by Proxmox metadata if present in description
         platform_by_vmid: Dict[int, Dict[str, Any]] = {}
@@ -239,19 +239,21 @@ class TemplateSyncDriver:
             p_slug = t["slug"]
             p_desc = t["description"]
 
-            existing = platform_by_vmid.get(vmid) or platform_by_slug.get(p_slug)
+            existing = platform_by_vmid.get(vmid) or platform_by_slug.get(p_slug) or platform_by_name.get(p_name.lower())
             if not existing:
                 logger.info("Creating NetBox Platform for Proxmox VM template: %s", p_name)
                 created = await netbox_driver.create_platform(name=p_name, slug=p_slug, description=p_desc)
                 if created:
                     platforms_created.append({"name": p_name, "vmid": vmid, "type": "vm"})
             else:
-                # If deprecated previously, restore name
                 curr_name = existing.get("name", "")
-                if curr_name.startswith("[Deprecated]"):
-                    restored_name = curr_name.replace("[Deprecated] ", "").strip()
-                    await netbox_driver.update_platform(existing["id"], {"name": restored_name, "description": p_desc})
-                    platforms_updated.append({"name": restored_name, "vmid": vmid, "status": "restored"})
+                curr_desc = existing.get("description") or ""
+                is_deprecated = curr_name.startswith("[Deprecated]") or "[⚠️" in curr_desc
+                needs_update = is_deprecated or (curr_desc != p_desc) or (curr_name != p_name)
+                if needs_update:
+                    await netbox_driver.update_platform(existing["id"], {"name": p_name, "description": p_desc})
+                    status_type = "restored" if is_deprecated else "updated"
+                    platforms_updated.append({"name": p_name, "vmid": vmid, "status": status_type})
 
         # ── 2. Reconcile LXC CT Templates ──────────────────────────────────────
         for t in ct_templates:
@@ -260,21 +262,24 @@ class TemplateSyncDriver:
             p_slug = t["platform_slug"]
             p_desc = f"[Proxmox LXC Template: {volid}]"
 
-            existing = platform_by_volid.get(volid) or platform_by_slug.get(p_slug)
+            existing = platform_by_volid.get(volid) or platform_by_slug.get(p_slug) or platform_by_name.get(p_name.lower())
             if not existing:
                 logger.info("Creating NetBox Platform for Proxmox LXC template: %s", p_name)
                 created = await netbox_driver.create_platform(name=p_name, slug=p_slug, description=p_desc)
                 if created:
                     platforms_created.append({"name": p_name, "volid": volid, "type": "lxc"})
             else:
-                # Update description if missing template tag
+                curr_name = existing.get("name", "")
                 curr_desc = existing.get("description") or ""
-                if "[Proxmox LXC Template:" not in curr_desc or curr_desc.startswith("[Deprecated]"):
+                is_deprecated = curr_name.startswith("[Deprecated]") or "[⚠️" in curr_desc
+                needs_update = is_deprecated or (curr_desc != p_desc) or (curr_name != p_name)
+                if needs_update:
                     await netbox_driver.update_platform(existing["id"], {
                         "name": p_name,
                         "description": p_desc,
                     })
-                    platforms_updated.append({"name": p_name, "volid": volid, "status": "updated"})
+                    status_type = "restored" if is_deprecated else "updated"
+                    platforms_updated.append({"name": p_name, "volid": volid, "status": status_type})
 
         # ── 3. Reconcile Orphaned NetBox Platforms ─────────────────────────────
         # Refresh platforms list to evaluate deletions
@@ -296,8 +301,9 @@ class TemplateSyncDriver:
                             platforms_deleted.append({"name": p_name, "vmid": vmid, "type": "vm"})
                             logger.info("Deleted orphaned NetBox Platform '%s' (VMID %d removed from Proxmox)", p_name, vmid)
                     elif not p_name.startswith("[Deprecated]"):
+                        clean_desc = re.sub(r"^\[⚠️[^\]]+\]\s*", "", desc)
                         dep_name = f"[Deprecated] {p_name}"[:100]
-                        dep_desc = f"[⚠️ Proxmox template {vmid} deleted] {desc}"[:200]
+                        dep_desc = f"[⚠️ Proxmox template {vmid} deleted] {clean_desc}"[:200]
                         await netbox_driver.update_platform(p_id, {"name": dep_name, "description": dep_desc})
                         platforms_deprecated.append({"name": p_name, "active_vms": vm_usage, "type": "vm"})
 
@@ -312,8 +318,9 @@ class TemplateSyncDriver:
                             platforms_deleted.append({"name": p_name, "volid": volid, "type": "lxc"})
                             logger.info("Deleted orphaned NetBox Platform '%s' (LXC %s removed from Proxmox)", p_name, volid)
                     elif not p_name.startswith("[Deprecated]"):
+                        clean_desc = re.sub(r"^\[⚠️[^\]]+\]\s*", "", desc)
                         dep_name = f"[Deprecated] {p_name}"[:100]
-                        dep_desc = f"[⚠️ Proxmox template deleted] {desc}"[:200]
+                        dep_desc = f"[⚠️ Proxmox template deleted] {clean_desc}"[:200]
                         await netbox_driver.update_platform(p_id, {"name": dep_name, "description": dep_desc})
                         platforms_deprecated.append({"name": p_name, "active_vms": vm_usage, "type": "lxc"})
 

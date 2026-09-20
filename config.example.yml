@@ -25,6 +25,7 @@ defaults:
   role_lxc_id: 15    # Role ID for LXC Containers
   storage: "local-zfs"  # Proxmox storage pool name (fallback if not set per-cluster)
   bridge: "vmbr0"         # Proxmox network bridge name (fallback if not set per-cluster)
+  subnet: "192.168.1.0/24"  # Default fallback subnet for IPAM allocations
 
 # ── Hardware Fallbacks ────────────────────────────────────────────────────────
 # Emergency default specs if a VM is created without a VM Type and blank sliders.
@@ -42,6 +43,7 @@ templates:
   sync_interval_minutes: 60         # Frequency of template reconciliation in minutes
   linux_vmid_prefix: "90"           # Linux templates live in VMID range 9000-9099
   windows_vmid_prefix: "92"         # Windows templates live in VMID range 9200-9299
+  clone_timeout_seconds: 2400       # Maximum wait time for VM cloning operations in seconds (default: 2400s / 40 mins)
   default_windows_password: "P@ssw0rdInitial!"  # Initial Administrator password for Windows VMs
 
 # ── Traefik Ingress Synchronization ───────────────────────────────────────────

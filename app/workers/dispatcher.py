@@ -345,6 +345,10 @@ async def process_netbox_webhook_event(job_id: str, payload: Dict[str, Any]):
 
     _active_provisioning_vms.add(lock_key)
     try:
+        # Extract NetBox Config Context early
+        cfg_ctx = data.get("config_context") or {}
+        ctx_subnet = cfg_ctx.get("subnet")
+
         # Extract Primary IP / Requested IP
         primary_ip = None
         if custom_fields.get("requested_ip"):
@@ -358,6 +362,7 @@ async def process_netbox_webhook_event(job_id: str, payload: Dict[str, Any]):
         # Dynamic NetBox IPAM Next-Available-IP Allocation if no IP was provided
         if not primary_ip:
             allocated_ip = await netbox_driver.get_or_allocate_available_ip(
+                prefix_cidr=ctx_subnet,
                 hostname=hostname,
             )
             if allocated_ip:

@@ -6,6 +6,7 @@ from typing import Optional, List, Dict, Any, Tuple, Callable
 from pathlib import Path
 from proxmoxer import ProxmoxAPI
 from app.core.config import settings
+from app.core.app_config import app_config
 
 logger = logging.getLogger("orchestrator.proxmox")
 
@@ -35,23 +36,64 @@ class ProxmoxDriver:
             self._pve = ProxmoxAPI(**auth_kwargs)
         return self._pve
 
-    def wait_for_task(self, node: str, upid: str, timeout: int = 600, poll_interval: float = 2.0) -> bool:
+    def wait_for_task(
+        self,
+        node: str,
+        upid: str,
+        timeout: int = 1800,
+        poll_interval: float = 2.0,
+        log_callback: Optional[Callable[[str], None]] = None,
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> bool:
         """
         Polls a Proxmox task UPID until completed.
+        Optionally streams task progress logs via log_callback and progress_callback.
         Raises RuntimeError if task exits with non-OK status.
         """
         pve = self.get_client()
         start = time.time()
-        logger.info("Waiting for Proxmox task UPID: %s on node %s", upid, node)
+        last_log_check = 0.0
+        last_reported_pct = -1
+        last_line_read = 0
+        logger.info("Waiting for Proxmox task UPID: %s on node %s (timeout: %ds)", upid, node, timeout)
         
         while time.time() - start < timeout:
             task = pve.nodes(node).tasks(upid).status.get()
             if task.get("status") == "stopped":
                 exit_status = task.get("exitstatus", "OK")
-                if exit_status == "OK":
-                    logger.info("Task %s completed successfully", upid)
+                if exit_status == "OK" or (isinstance(exit_status, str) and exit_status.startswith("WARNINGS")):
+                    logger.info("Task %s completed successfully (status: %s)", upid, exit_status)
                     return True
                 raise RuntimeError(f"Proxmox task {upid} failed with exitstatus: {exit_status}")
+
+            now = time.time()
+            if (log_callback or progress_callback) and (now - last_log_check >= 5.0):
+                last_log_check = now
+                try:
+                    log_entries = pve.nodes(node).tasks(upid).log.get(start=last_line_read, limit=50)
+                    if log_entries:
+                        for entry in log_entries:
+                            line_num = entry.get("n", last_line_read + 1)
+                            if line_num > last_line_read:
+                                last_line_read = line_num
+                            text = entry.get("t", "")
+                            m = re.search(r"transferred .*?\((\d+(?:\.\d+)?%)\)", text)
+                            if m:
+                                pct_str = m.group(1)
+                                try:
+                                    pct_val = int(float(pct_str.rstrip("%")))
+                                except Exception:
+                                    pct_val = -1
+                                if pct_val >= 0 and (pct_val >= last_reported_pct + 10 or pct_val == 100):
+                                    last_reported_pct = (pct_val // 10) * 10
+                                    msg = f"Cloning progress: {text.strip()}"
+                                    if log_callback:
+                                        log_callback(msg)
+                                    if progress_callback:
+                                        progress_callback(f"⏳ {msg}")
+                except Exception as log_err:
+                    logger.debug("Could not query task log for UPID %s: %s", upid, log_err)
+
             time.sleep(poll_interval)
             
         raise TimeoutError(f"Proxmox task {upid} timed out after {timeout} seconds")
@@ -370,7 +412,14 @@ class ProxmoxDriver:
             full=1,
             storage=target_storage,
         )
-        self.wait_for_task(target_node, clone_upid)
+        clone_timeout = int(app_config.templates.get("clone_timeout_seconds", 2400))
+        self.wait_for_task(
+            target_node,
+            clone_upid,
+            timeout=clone_timeout,
+            log_callback=log_callback,
+            progress_callback=progress_callback,
+        )
         if log_callback:
             log_callback("Template clone completed successfully.")
         if progress_callback:
@@ -488,6 +537,7 @@ class ProxmoxDriver:
         cores: int = 4,
         memory_mb: int = 8192,
         balloon_mb: int = 512,
+        onboot: bool = True,
         storage: Optional[str] = None,
         bridge: Optional[str] = None,
         start_on_create: bool = True,
@@ -539,7 +589,14 @@ class ProxmoxDriver:
             full=1,
             storage=target_storage,
         )
-        self.wait_for_task(target_node, clone_upid)
+        clone_timeout = int(app_config.templates.get("clone_timeout_seconds", 2400))
+        self.wait_for_task(
+            target_node,
+            clone_upid,
+            timeout=clone_timeout,
+            log_callback=log_callback,
+            progress_callback=progress_callback,
+        )
         if log_callback:
             log_callback("Windows template clone completed successfully.")
         if progress_callback:
@@ -635,20 +692,40 @@ class ProxmoxDriver:
         }
 
     def find_lxc_template(self, node: str) -> str:
-        """Find an available LXC OS template on storage (e.g. backups, local, zfs-storage)."""
+        """Find an available LXC OS template across all storage pools supporting vztmpl."""
         pve = self.get_client()
         target_node = self.resolve_node(node)
-        for s in ["backups", "local", "zfs-storage"]:
+        candidate_storages = []
+        try:
+            storages = pve.nodes(target_node).storage.get()
+            for s in storages:
+                if "vztmpl" in s.get("content", ""):
+                    candidate_storages.append(s.get("storage"))
+        except Exception as exc:
+            logger.warning("Failed to query storage pools on node '%s': %s", target_node, exc)
+
+        for fallback_storage in ["extra-storage", "backups", "local", "zfs-storage"]:
+            if fallback_storage not in candidate_storages:
+                candidate_storages.append(fallback_storage)
+
+        first_volid = None
+        for s in candidate_storages:
             try:
                 r = pve.nodes(target_node).storage(s).content.get(content="vztmpl")
                 for item in r:
                     volid = item.get("volid", "")
+                    if not volid:
+                        continue
                     if "ubuntu" in volid.lower():
                         return volid
-                if r:
-                    return r[0]["volid"]
+                    if not first_volid:
+                        first_volid = volid
             except Exception:
                 continue
+
+        if first_volid:
+            return first_volid
+
         return "backups:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
 
     def calculate_ip_and_gateway(
@@ -752,7 +829,13 @@ class ProxmoxDriver:
                 log_callback("Attached SSH public key(s) to LXC container.")
 
         upid = pve.nodes(target_node).lxc.post(**lxc_params)
-        self.wait_for_task(target_node, upid, timeout=120)
+        self.wait_for_task(
+            target_node,
+            upid,
+            timeout=300,
+            log_callback=log_callback,
+            progress_callback=progress_callback,
+        )
 
         if log_callback:
             log_callback(f"LXC Container {vmid} is now running!")

@@ -9,6 +9,45 @@ from app.drivers.proxmox.qemu import ProxmoxQemuManager
 
 logger = logging.getLogger("orchestrator.proxmox.lxc")
 
+VALID_SSH_KEY_PREFIXES = (
+    "ssh-rsa",
+    "ssh-dss",
+    "ssh-ed25519",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "sk-ssh-ed25519@openssh.com",
+    "sk-ecdsa-sha2-nistp256@openssh.com",
+)
+
+
+def sanitize_ssh_public_keys(raw_keys: Optional[str]) -> Optional[str]:
+    """
+    Sanitizes and validates SSH public keys for Proxmox LXC containers.
+    Ensures each line is in valid OpenSSH format and un-encoded plain text.
+    Filters out empty lines, comments, and malformed strings to prevent 500 API errors.
+    """
+    if not raw_keys or not str(raw_keys).strip():
+        return None
+
+    clean_keys = []
+    # If the string was URL-encoded previously, decode it to raw text
+    decoded = urllib.parse.unquote(str(raw_keys))
+
+    for line in decoded.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) >= 2 and any(parts[0] == prefix or parts[0].startswith(prefix) for prefix in VALID_SSH_KEY_PREFIXES):
+            clean_keys.append(line)
+        else:
+            logger.warning("Ignoring invalid or non-OpenSSH public key format in LXC provisioning: %s", line[:30])
+
+    if clean_keys:
+        return "\n".join(clean_keys)
+    return None
+
 
 class ProxmoxLxcManager:
     """Manages Proxmox LXC System Container creation, network configuration, and SSH provisioning."""
@@ -118,10 +157,14 @@ class ProxmoxLxcManager:
             if log_callback:
                 log_callback("Configured root password for container console access.")
 
-        if resolved_ssh:
-            lxc_params["ssh-public-keys"] = urllib.parse.quote(resolved_ssh, safe="")
+        sanitized_ssh = sanitize_ssh_public_keys(resolved_ssh)
+        if sanitized_ssh:
+            lxc_params["ssh-public-keys"] = sanitized_ssh
             if log_callback:
-                log_callback("Attached SSH public key(s) to LXC container.")
+                log_callback("Attached valid SSH public key(s) to LXC container.")
+        elif resolved_ssh:
+            if log_callback:
+                log_callback("Warning: Provided SSH public key failed format validation and was omitted to prevent creation failure.")
 
         upid = pve.nodes(target_node).lxc.post(**lxc_params)
         self.client_mgr.wait_for_task(

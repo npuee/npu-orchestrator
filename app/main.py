@@ -22,119 +22,13 @@ from app.drivers.traefik_sync import traefik_sync_driver
 from app.drivers.metrics_sync import metrics_sync_driver
 from app.drivers.template_sync import template_sync_driver
 
+from app.workers.scheduler import scheduler
+
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("orchestrator.main")
-
-
-async def orchestrator_background_reconciler_loop():
-    """Periodic background reconciler managing scheduled synchronization tasks."""
-    logger.info("Background reconciliation loop started (heartbeat every 60s)...")
-    last_traefik_sync = 0
-    last_telemetry_sync = 0
-    last_template_sync = 0
-    last_kuma_sync = 0
-    last_kuma_services_sync = 0
-    last_db_prune = 0
-
-    while True:
-        try:
-            await asyncio.sleep(60)
-            now = time.time()
-
-            # 1. Traefik Ingress Synchronization (Optional Module)
-            if module_manager.is_enabled("traefik"):
-                traefik_cfg = app_config.traefik
-                traefik_interval = traefik_cfg.get("sync_interval_minutes", 15) * 60
-                if now - last_traefik_sync >= traefik_interval:
-                    logger.info("Executing scheduled Traefik -> NetBox sync (every %d mins)...", traefik_cfg.get("sync_interval_minutes", 15))
-                    try:
-                        t_res = await traefik_sync_driver.sync_all_instances()
-                        instances = [i.get("name") for i in traefik_cfg.get("instances", [])]
-                        module_manager.set_module_status("traefik", "connected", {"instances": instances, "summary": t_res})
-                    except Exception as e:
-                        logger.warning("Scheduled Traefik sync encountered an error: %s", e)
-                        module_manager.set_module_status("traefik", "error", error=str(e))
-                    last_traefik_sync = now
-
-            # 2. Proxmox Telemetry & Metrics Synchronization (Optional Module)
-            if module_manager.is_enabled("telemetry"):
-                telemetry_cfg = app_config.telemetry
-                telemetry_interval = telemetry_cfg.get("sync_interval_minutes", 15) * 60
-                if now - last_telemetry_sync >= telemetry_interval:
-                    logger.info("Executing scheduled Proxmox VM Telemetry -> NetBox sync...")
-                    try:
-                        m_res = await metrics_sync_driver.sync_metrics_to_netbox()
-                        module_manager.set_module_status("telemetry", "active", {"updated_vms": m_res.get("updated_count", 0)})
-                    except Exception as e:
-                        logger.warning("Scheduled Proxmox Telemetry sync encountered an error: %s", e)
-                        module_manager.set_module_status("telemetry", "error", error=str(e))
-                    last_telemetry_sync = now
-
-            # 3. Proxmox Templates -> NetBox Platforms Synchronization (Optional Module)
-            if module_manager.is_enabled("templates"):
-                templates_cfg = app_config.templates
-                template_interval = templates_cfg.get("sync_interval_minutes", 60) * 60
-                if now - last_template_sync >= template_interval:
-                    logger.info("Executing scheduled Proxmox Templates -> NetBox Platforms sync...")
-                    try:
-                        t_res = await template_sync_driver.sync_all_templates()
-                        module_manager.set_module_status("templates", "active", {"summary": t_res.get("summary")})
-                    except Exception as e:
-                        logger.warning("Scheduled Template sync encountered an error: %s", e)
-                        module_manager.set_module_status("templates", "error", error=str(e))
-                    last_template_sync = now
-
-            # 4. NetBox Inventory -> Uptime Kuma Device Ping Monitoring (Optional Module)
-            if module_manager.is_enabled("uptime_kuma"):
-                kuma_cfg = app_config.uptime_kuma
-                devices_cfg = kuma_cfg.get("devices", {})
-                kuma_interval = devices_cfg.get("sync_interval_minutes", kuma_cfg.get("sync_interval_minutes", 30)) * 60
-                if now - last_kuma_sync >= kuma_interval:
-                    logger.info("Executing scheduled NetBox -> Uptime Kuma Device sync (every %d mins)...", kuma_interval // 60)
-                    try:
-                        from app.scripts.sync_kuma_inventory import run_sync
-                        k_res = await run_sync()
-                        module_manager.set_module_status("uptime_kuma", "connected", {
-                            "monitored_devices": k_res.get("total_monitored", 0),
-                            "url": settings.UPTIME_KUMA_URL,
-                        })
-                    except Exception as e:
-                        logger.warning("Scheduled Uptime Kuma device sync encountered an error: %s", e)
-                        module_manager.set_module_status("uptime_kuma", "error", error=str(e))
-                    last_kuma_sync = now
-
-            # 4b. NetBox Services -> Uptime Kuma HTTP Monitor Sync (Optional, requires services.enabled: true)
-            if module_manager.is_enabled("uptime_kuma"):
-                svc_cfg = app_config.uptime_kuma.get("services", {})
-                if svc_cfg.get("enabled", False):
-                    svc_interval = svc_cfg.get("sync_interval_minutes", 15) * 60
-                    if now - last_kuma_services_sync >= svc_interval:
-                        logger.info("Executing scheduled NetBox Services -> Uptime Kuma HTTP sync (every %d mins)...", svc_interval // 60)
-                        try:
-                            from app.scripts.sync_kuma_services import run_sync as run_services_sync
-                            await run_services_sync()
-                        except Exception as e:
-                            logger.warning("Scheduled Uptime Kuma services sync encountered an error: %s", e)
-                        last_kuma_services_sync = now
-
-            # 5. Database Historical Job Retention Pruning (Core Maintenance)
-            db_cfg = app_config.database
-            prune_interval = db_cfg.get("prune_interval_hours", 24) * 3600
-            if now - last_db_prune >= prune_interval:
-                retention_days = db_cfg.get("retention_days", 30)
-                try:
-                    await db.prune_old_jobs(days=retention_days)
-                except Exception as e:
-                    logger.warning("Scheduled database pruning encountered an error: %s", e)
-                last_db_prune = now
-
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.warning("Unexpected error in background reconciler: %s", e)
 
 
 async def run_startup_syncs():
@@ -263,8 +157,8 @@ async def lifespan(app: FastAPI):
     # Launch background startup synchronizations (non-blocking)
     startup_task = asyncio.create_task(run_startup_syncs())
 
-    # Launch background recurring loop
-    reconciler_task = asyncio.create_task(orchestrator_background_reconciler_loop())
+    # Launch decoupled background schedulers
+    scheduler.start()
 
     logger.info("%s ready to accept requests.", settings.APP_NAME)
     yield
@@ -272,9 +166,9 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down %s...", settings.APP_NAME)
     startup_task.cancel()
-    reconciler_task.cancel()
+    await scheduler.stop()
     try:
-        await asyncio.gather(startup_task, reconciler_task, return_exceptions=True)
+        await asyncio.gather(startup_task, return_exceptions=True)
     except Exception:
         pass
     await netbox_driver.close()
@@ -321,10 +215,12 @@ async def root():
 async def health():
     """
     Returns an instantaneous health and module status diagnostic report.
-    Reports connectivity of Core services (NetBox, Proxmox) and all optional
-    integration modules (Uptime Kuma, Traefik, DNS, Telemetry, Signal).
+    Reports connectivity of Core services (NetBox, Proxmox), optional
+    integration modules, and the decoupled background scheduler runners.
     """
-    return module_manager.get_health_report()
+    report = module_manager.get_health_report()
+    report["scheduler"] = scheduler.get_status()
+    return report
 
 
 if __name__ == "__main__":

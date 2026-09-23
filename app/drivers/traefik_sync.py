@@ -552,6 +552,8 @@ class TraefikSyncDriver:
         created = []
         updated = []
         unchanged = []
+        deleted = []
+        matched_service_ids = set()
 
         try:
             client = netbox_driver._get_client()
@@ -636,6 +638,7 @@ class TraefikSyncDriver:
 
                 if existing_svc:
                     svc_id = existing_svc["id"]
+                    matched_service_ids.add(svc_id)
                     curr_name = existing_svc.get("name", "")
                     curr_desc = existing_svc.get("description", "")
                     curr_ports = existing_svc.get("ports", [])
@@ -701,6 +704,7 @@ class TraefikSyncDriver:
                     )
                     if post_resp.status_code in (200, 201):
                         new_id = post_resp.json().get("id")
+                        matched_service_ids.add(new_id)
                         created.append({
                             "id": new_id,
                             "name": r["name"],
@@ -711,6 +715,50 @@ class TraefikSyncDriver:
                         logger.info("[%s] Created NetBox Service %s (ID: %d) on %s", instance_name, r["name"], new_id, parent_label)
                     else:
                         logger.warning("[%s] Failed to create Service %s on %s: %s", instance_name, r["name"], parent_label, post_resp.text)
+
+            # --- Orphan Pruning: Delete NetBox services that no longer exist in Traefik ---
+            orphans = [svc for svc in existing_list if svc.get("id") not in matched_service_ids]
+            if orphans:
+                tag_names = self.get_configured_tag_names()
+                configured_slugs = {re.sub(r"[^a-z0-9_-]", "-", t.lower()).strip("-") for t in tag_names}
+                configured_slugs.add("traefik")
+
+                for orphan in orphans:
+                    orphan_id = orphan.get("id")
+                    orphan_name = orphan.get("name", "")
+                    orphan_desc = orphan.get("description", "") or ""
+                    orphan_tags = {t.get("slug") for t in orphan.get("tags", []) if isinstance(t, dict)}
+
+                    # Strict Safety Guard: Only prune if explicitly tagged with Traefik tag OR description starts with Traefik Ingress
+                    is_traefik_tagged = bool(orphan_tags.intersection(configured_slugs))
+                    is_traefik_desc = orphan_desc.startswith("Traefik Ingress:")
+
+                    if not (is_traefik_tagged or is_traefik_desc):
+                        logger.debug(
+                            "[%s] Preserving non-Traefik service '%s' (ID: %s) on %s during orphan cleanup",
+                            instance_name, orphan_name, orphan_id, parent_label
+                        )
+                        continue
+
+                    del_resp = await client.delete(
+                        f"{netbox_driver.base_url}/api/ipam/services/{orphan_id}/",
+                        headers=headers,
+                    )
+                    if del_resp.status_code in (200, 204):
+                        deleted.append({
+                            "id": orphan_id,
+                            "name": orphan_name,
+                            "description": orphan_desc,
+                        })
+                        logger.info(
+                            "[%s] Pruned orphaned NetBox Service '%s' (ID: %d) on %s (removed from Traefik)",
+                            instance_name, orphan_name, orphan_id, parent_label
+                        )
+                    else:
+                        logger.warning(
+                            "[%s] Failed to prune orphaned Service %d ('%s'): %s",
+                            instance_name, orphan_id, orphan_name, del_resp.text
+                        )
 
         except Exception as e:
             logger.exception("Error syncing Traefik routes for %s: %s", instance_name, e)
@@ -727,9 +775,11 @@ class TraefikSyncDriver:
             "created_count": len(created),
             "updated_count": len(updated),
             "unchanged_count": len(unchanged),
+            "deleted_count": len(deleted),
             "created": created,
             "updated": updated,
             "unchanged": unchanged,
+            "deleted": deleted,
         }
 
     async def sync_all_instances(self) -> Dict[str, Any]:
@@ -760,6 +810,21 @@ class TraefikSyncDriver:
             except Exception as e:
                 logger.error("Failed to sync Traefik instance '%s': %s", name, e)
                 results[name] = {"status": "error", "error": str(e)}
+
+        # If any orphaned services were pruned from NetBox, trigger Uptime Kuma reconciliation
+        total_pruned = sum(r.get("deleted_count", 0) for r in results.values() if isinstance(r, dict))
+        if total_pruned > 0:
+            logger.info("Traefik sync pruned %d orphaned NetBox service(s).", total_pruned)
+            try:
+                from app.core.modules import module_manager
+                if module_manager.is_enabled("uptime_kuma"):
+                    svc_cfg = app_config.uptime_kuma.get("services", {})
+                    if svc_cfg.get("enabled", False):
+                        logger.info("Triggering background Uptime Kuma services sync to prune orphaned monitors...")
+                        from app.scripts.sync_kuma_services import run_sync as run_kuma_services_sync
+                        asyncio.create_task(run_kuma_services_sync())
+            except Exception as ke:
+                logger.warning("Could not trigger Uptime Kuma reconciliation after orphan prune: %s", ke)
 
         return results
 

@@ -57,6 +57,28 @@ class NetBoxDriver:
             logger.error("Exception fetching NetBox VM %d: %s", vm_id, e)
         return None
 
+    async def get_cluster_virtual_machines(self, cluster_id: int) -> List[Dict[str, Any]]:
+        """
+        Fetches all VirtualMachine objects in NetBox assigned to a specific cluster ID.
+        """
+        if not self.is_configured():
+            return []
+
+        headers = {
+            "Authorization": f"Token {self.token}",
+            "Accept": "application/json",
+        }
+        url = f"{self.base_url}/api/virtualization/virtual-machines/?cluster_id={cluster_id}&limit=200"
+        try:
+            client = self._get_client()
+            resp = await client.get(url, headers=headers)
+            if resp.status_code == 200:
+                return resp.json().get("results", [])
+            logger.warning("Failed to fetch cluster VMs for cluster %d: HTTP %d %s", cluster_id, resp.status_code, resp.text)
+        except Exception as e:
+            logger.error("Exception fetching cluster VMs for cluster %d: %s", cluster_id, e)
+        return []
+
     async def update_virtual_machine(
         self,
         vm_id: int,

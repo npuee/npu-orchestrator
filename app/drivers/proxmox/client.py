@@ -1,6 +1,8 @@
 import time
 import logging
 import re
+import threading
+from contextlib import contextmanager
 from typing import Optional, List, Dict, Any, Callable
 from proxmoxer import ProxmoxAPI
 from app.core.config import settings
@@ -14,6 +16,8 @@ class ProxmoxClientManager:
 
     def __init__(self):
         self._pve: Optional[ProxmoxAPI] = None
+        self._vmid_lock = threading.Lock()
+        self._reserved_vmids = set()
 
     def get_client(self) -> ProxmoxAPI:
         """Lazily initialize and return ProxmoxAPI client."""
@@ -99,11 +103,37 @@ class ProxmoxClientManager:
         raise ProxmoxTaskTimeoutError(upid=upid, timeout_seconds=timeout, node=node)
 
     def get_next_vmid(self) -> int:
-        """Fetches the next available VMID in the cluster."""
+        """Fetches the next available VMID in the cluster, synchronized with in-memory reservation."""
         pve = self.get_client()
-        next_id = int(pve.cluster.nextid.get())
-        logger.info("Fetched next available VMID: %d", next_id)
-        return next_id
+        with self._vmid_lock:
+            next_id = int(pve.cluster.nextid.get())
+            while next_id in self._reserved_vmids:
+                next_id += 1
+            self._reserved_vmids.add(next_id)
+            logger.info("Allocated & reserved next available VMID: %d (active reservations: %s)", next_id, list(self._reserved_vmids))
+            return next_id
+
+    def release_vmid(self, vmid: Optional[int]):
+        """Releases an in-memory VMID reservation once Proxmox registration is completed or failed."""
+        if not vmid:
+            return
+        with self._vmid_lock:
+            self._reserved_vmids.discard(vmid)
+            logger.debug("Released VMID reservation for %d", vmid)
+
+    @contextmanager
+    def reserve_vmid(self, vmid: Optional[int] = None):
+        """Context manager to safely reserve a VMID during clone/creation tasks."""
+        allocated_id = vmid
+        if not allocated_id:
+            allocated_id = self.get_next_vmid()
+        else:
+            with self._vmid_lock:
+                self._reserved_vmids.add(allocated_id)
+        try:
+            yield allocated_id
+        finally:
+            self.release_vmid(allocated_id)
 
     def get_online_nodes(self) -> List[str]:
         """Returns list of online node names in the cluster."""

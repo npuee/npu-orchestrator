@@ -22,6 +22,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "memory_mb": 2048,
         "disk_gb": 20,
     },
+    "reconciler": {
+        "enabled": True,
+        "interval_minutes": 15,
+    },
     "templates": {
         "enabled": True,
         "sync_interval_minutes": 60,
@@ -178,6 +182,10 @@ class AppConfig:
     @property
     def database(self) -> Dict[str, Any]:
         return self._data.get("database", DEFAULT_CONFIG["database"])
+
+    @property
+    def reconciler(self) -> Dict[str, Any]:
+        return self._data.get("reconciler", DEFAULT_CONFIG["reconciler"])
 
 
 app_config = AppConfig()

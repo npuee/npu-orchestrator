@@ -33,6 +33,14 @@ fallbacks:
   memory_mb: 2048           # Default RAM in MB (2048 = 2GB)
   disk_gb: 20               # Default root disk size in GB
 
+# ── Declared-State Reconciliation Engine ──────────────────────────────────────
+# Continuously compares Declared State (NetBox) against Actual State (Proxmox).
+# Periodically heals silent drift, recovers from dropped webhooks, and aligns
+# power states, hardware specs, and DNS records automatically.
+reconciler:
+  enabled: true                     # Enable periodic safety-net reconciliation
+  interval_minutes: 15              # Safety-net sweep interval (default: 15 minutes)
+
 # ── Proxmox Template Settings ─────────────────────────────────────────────────
 # Controls how the orchestrator selects templates when cloning VMs.
 templates:

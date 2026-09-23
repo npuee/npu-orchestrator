@@ -254,6 +254,23 @@ class BackgroundScheduler:
             )
         )
 
+        # 7. Declared-State Safety-Net Reconciliation Pass
+        async def _run_state_reconciliation():
+            from app.workers.reconciler import reconciler
+            rec_summary = await reconciler.reconcile_cluster()
+            logger.info("Periodic state reconciliation completed: %s", rec_summary)
+
+        self.tasks.append(
+            PeriodicTask(
+                name="state_reconciler",
+                task_func=_run_state_reconciliation,
+                interval_getter=lambda: app_config.reconciler.get("interval_minutes", 15) * 60,
+                enabled_getter=lambda: app_config.reconciler.get("enabled", True),
+                timeout_seconds=300.0,
+                initial_delay=45.0,
+            )
+        )
+
         self._initialized = True
 
     def start(self):

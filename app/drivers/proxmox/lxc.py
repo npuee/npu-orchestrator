@@ -74,85 +74,91 @@ class ProxmoxLxcManager:
         target_storage = storage or settings.PROXMOX_DEFAULT_STORAGE
 
         # 1. Allocate VMID
+        allocated_vmid = False
         if not vmid:
-            vmid = int(pve.cluster.nextid.get())
+            vmid = self.client_mgr.get_next_vmid()
+            allocated_vmid = True
             if log_callback:
                 log_callback(f"Allocated next available CT ID: {vmid}")
 
-        # 2. Resolve template volid
-        if not template_volid:
-            template_volid = self.template_mgr.find_lxc_template(target_node)
+        try:
+            # 2. Resolve template volid
+            if not template_volid:
+                template_volid = self.template_mgr.find_lxc_template(target_node)
+                if log_callback:
+                    log_callback(f"Resolved LXC template: '{template_volid}'")
+
+            # 3. Calculate IP & Network settings
+            ip_cidr, target_gw = self.calculate_ip_and_gateway(vmid, ip_address, gateway)
+            target_dns = dns_server or settings.DEFAULT_DNS_SERVER
+            target_domain = dns_domain or settings.DEFAULT_DNS_DOMAIN
+
+            # 4. Create LXC Container
             if log_callback:
-                log_callback(f"Resolved LXC template: '{template_volid}'")
+                log_callback(f"Creating LXC Container {vmid} ('{hostname}') on {target_storage} with {cores or 2} cores, {memory_mb or 2048}MB RAM, {disk_size_gb}GB disk...")
+            if progress_callback:
+                progress_callback(f"🚀 Proxmox LXC creation started: Building CT {vmid} ('{hostname}') from '{template_volid}' on node '{target_node}'...")
 
-        # 3. Calculate IP & Network settings
-        ip_cidr, target_gw = self.calculate_ip_and_gateway(vmid, ip_address, gateway)
-        target_dns = dns_server or settings.DEFAULT_DNS_SERVER
-        target_domain = dns_domain or settings.DEFAULT_DNS_DOMAIN
+            resolved_ssh = self.qemu_mgr._resolve_ssh_key(ssh_key)
 
-        # 4. Create LXC Container
-        if log_callback:
-            log_callback(f"Creating LXC Container {vmid} ('{hostname}') on {target_storage} with {cores or 2} cores, {memory_mb or 2048}MB RAM, {disk_size_gb}GB disk...")
-        if progress_callback:
-            progress_callback(f"🚀 Proxmox LXC creation started: Building CT {vmid} ('{hostname}') from '{template_volid}' on node '{target_node}'...")
+            lxc_params = {
+                "vmid": vmid,
+                "hostname": hostname,
+                "ostemplate": template_volid,
+                "rootfs": f"{target_storage}:{disk_size_gb}",
+                "cores": cores or 2,
+                "memory": memory_mb or 2048,
+                "swap": swap_mb,
+                "net0": f"name=eth0,bridge={bridge or settings.DEFAULT_BRIDGE},ip={ip_cidr},gw={target_gw},type=veth",
+                "nameserver": target_dns,
+                "searchdomain": target_domain,
+                "onboot": 1 if onboot else 0,
+                "unprivileged": 1 if unprivileged else 0,
+                "features": features,
+                "start": 1 if start_on_create else 0,
+            }
+            if password:
+                lxc_params["password"] = password
+                if log_callback:
+                    log_callback("Configured root password for container console access.")
 
-        resolved_ssh = self.qemu_mgr._resolve_ssh_key(ssh_key)
+            sanitized_ssh = sanitize_ssh_public_keys(resolved_ssh)
+            if sanitized_ssh:
+                lxc_params["ssh-public-keys"] = sanitized_ssh
+                if log_callback:
+                    log_callback("Attached valid SSH public key(s) to LXC container.")
+            elif resolved_ssh:
+                if log_callback:
+                    log_callback("Warning: Provided SSH public key failed format validation and was omitted to prevent creation failure.")
 
-        lxc_params = {
-            "vmid": vmid,
-            "hostname": hostname,
-            "ostemplate": template_volid,
-            "rootfs": f"{target_storage}:{disk_size_gb}",
-            "cores": cores or 2,
-            "memory": memory_mb or 2048,
-            "swap": swap_mb,
-            "net0": f"name=eth0,bridge={bridge or settings.DEFAULT_BRIDGE},ip={ip_cidr},gw={target_gw},type=veth",
-            "nameserver": target_dns,
-            "searchdomain": target_domain,
-            "onboot": 1 if onboot else 0,
-            "unprivileged": 1 if unprivileged else 0,
-            "features": features,
-            "start": 1 if start_on_create else 0,
-        }
-        if password:
-            lxc_params["password"] = password
+            upid = pve.nodes(target_node).lxc.post(**lxc_params)
+            self.client_mgr.wait_for_task(
+                target_node,
+                upid,
+                timeout=300,
+                log_callback=log_callback,
+                progress_callback=progress_callback,
+            )
+
             if log_callback:
-                log_callback("Configured root password for container console access.")
+                log_callback(f"LXC Container {vmid} is now running!")
+            if progress_callback:
+                progress_callback(f"⚡ CT {vmid} created successfully! Container is now active.")
 
-        sanitized_ssh = sanitize_ssh_public_keys(resolved_ssh)
-        if sanitized_ssh:
-            lxc_params["ssh-public-keys"] = sanitized_ssh
-            if log_callback:
-                log_callback("Attached valid SSH public key(s) to LXC container.")
-        elif resolved_ssh:
-            if log_callback:
-                log_callback("Warning: Provided SSH public key failed format validation and was omitted to prevent creation failure.")
-
-        upid = pve.nodes(target_node).lxc.post(**lxc_params)
-        self.client_mgr.wait_for_task(
-            target_node,
-            upid,
-            timeout=300,
-            log_callback=log_callback,
-            progress_callback=progress_callback,
-        )
-
-        if log_callback:
-            log_callback(f"LXC Container {vmid} is now running!")
-        if progress_callback:
-            progress_callback(f"⚡ CT {vmid} created successfully! Container is now active.")
-
-        return {
-            "vmid": vmid,
-            "hostname": hostname,
-            "ip_address": ip_cidr.split("/")[0],
-            "gateway": target_gw,
-            "dns_server": target_dns,
-            "dns_domain": target_domain,
-            "disk_size_gb": disk_size_gb,
-            "cores": cores or 2,
-            "memory_mb": memory_mb or 2048,
-            "node": target_node,
-            "status": "running" if start_on_create else "stopped",
-            "category": "lxc",
-        }
+            return {
+                "vmid": vmid,
+                "hostname": hostname,
+                "ip_address": ip_cidr.split("/")[0],
+                "gateway": target_gw,
+                "dns_server": target_dns,
+                "dns_domain": target_domain,
+                "disk_size_gb": disk_size_gb,
+                "cores": cores or 2,
+                "memory_mb": memory_mb or 2048,
+                "node": target_node,
+                "status": "running" if start_on_create else "stopped",
+                "category": "lxc",
+            }
+        finally:
+            if allocated_vmid:
+                self.client_mgr.release_vmid(vmid)

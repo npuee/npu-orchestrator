@@ -53,6 +53,12 @@ class ProxmoxDriver:
     def get_next_vmid(self) -> int:
         return self.client_mgr.get_next_vmid()
 
+    def release_vmid(self, vmid: Optional[int]):
+        return self.client_mgr.release_vmid(vmid)
+
+    def reserve_vmid(self, vmid: Optional[int] = None):
+        return self.client_mgr.reserve_vmid(vmid)
+
     def get_online_nodes(self) -> List[str]:
         return self.client_mgr.get_online_nodes()
 

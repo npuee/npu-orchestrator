@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Declared-State Reconciliation Engine**:
+  - Transitioned the orchestration core from an event-driven webhook parser into a continuous Declared-State Reconciliation Engine (`app/workers/reconciler.py`).
+  - Implemented typed `WorkloadDeclaredState`, `WorkloadActualState`, and `WorkloadDelta` calculations ($Declared - Actual \rightarrow Action$).
+  - Automatically heals silent drift, recovers from dropped or missed webhooks, and aligns power states, hardware specs (cores, RAM, disk), hostnames, and dynamic DNS.
+- **Synchronized Proxmox VMID Allocation & Concurrency Locking**:
+  - Implemented thread-safe `_vmid_lock` and in-memory VMID reservation tracking in `ProxmoxClientManager` to eliminate race conditions from concurrent creations.
+  - Guarantees strictly sequential, collision-free VMID allocation across parallel QEMU and LXC provisioning tasks.
+- **Periodic Safety-Net Reconciler Runner & Operator API**:
+  - Registered `state_reconciler` periodic runner in `BackgroundScheduler` (default: every 15 minutes) to continuously monitor and self-heal managed cluster workloads.
+  - Added `POST /api/v1/sync/reconcile` REST endpoint for on-demand single-workload or cluster-wide reconciliation passes.
+  - Added `metadata` parameter support to `Database.update_job()` for structured job telemetry and execution summaries.
+
+### Changed
+- **Lightweight Ingress Webhook Dispatcher**:
+  - Refactored `app/workers/dispatcher.py` into a thin ingress filter that enforces cluster and site guard rails, fast-drops echoes in <1ms, and delegates state transitions to the reconciliation engine.
 - **Feature-Grouped Traefik Middleware & Service Field Schema**:
   - Reorganized Traefik configuration in `config.yml` to feature-grouped `middlewares` (`ip_whitelist`, `sso`), bundling custom field mappings (`netbox_field`) together with their detection substrings (`patterns`).
   - Added dedicated `service_fields` block to map extracted route attributes (`fqdn`, `public_url`, `middlewares`) directly to NetBox custom field names.

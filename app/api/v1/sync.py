@@ -263,3 +263,26 @@ async def sync_services_to_uptime_kuma():
         logger.exception("Error synchronizing services to Uptime Kuma: %s", e)
         module_manager.set_module_status("uptime_kuma", "error", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/reconcile", summary="Trigger Declared-State Reconciliation")
+async def trigger_declared_state_reconciliation(
+    vm_id: Optional[int] = Query(None, description="Specific NetBox Virtual Machine ID. If omitted, performs a full cluster reconciliation pass."),
+):
+    """
+    Triggers on-demand reconciliation of live Proxmox state against NetBox declared state.
+    - If vm_id is provided: reconciles that specific workload.
+    - If vm_id is omitted: runs a full safety-net sweep across all cluster workloads.
+    """
+    from app.workers.reconciler import reconciler
+    try:
+        if vm_id:
+            res = await reconciler.reconcile_workload(netbox_vm_id=vm_id, trigger="manual_api")
+            return {"target": f"vm_{vm_id}", "result": res}
+        else:
+            res = await reconciler.reconcile_cluster()
+            return {"target": "cluster", "summary": res}
+    except Exception as e:
+        logger.exception("Error during declared-state reconciliation: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+

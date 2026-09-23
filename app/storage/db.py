@@ -193,6 +193,7 @@ class Database:
         hostname: Optional[str] = None,
         ip_address: Optional[str] = None,
         error: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ):
         now = datetime.now(timezone.utc).isoformat()
         conn = await self.get_connection()
@@ -212,6 +213,9 @@ class Database:
             if error is not None:
                 query += ", error = ?"
                 params.append(error)
+            if metadata is not None:
+                query += ", metadata = ?"
+                params.append(json.dumps(metadata))
 
             query += " WHERE job_id = ?"
             params.append(job_id)

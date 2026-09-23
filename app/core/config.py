@@ -29,7 +29,6 @@ class Settings(BaseSettings):
     DEFAULT_GATEWAY: str = "192.168.1.1"
     DEFAULT_BRIDGE: str = "vmbr0"
     DEFAULT_SSH_KEY: Optional[str] = None  # Raw public key string (e.g. ssh-ed25519 AAAAC3...)
-    DEFAULT_SSH_KEY_FILE: Optional[str] = "/root/scripts/keys/main.pub"
 
     # NetBox Integration
     NETBOX_URL: Optional[str] = None
@@ -50,7 +49,6 @@ class Settings(BaseSettings):
     # Traefik Sync Settings
     TRAEFIK_SYNC_ENABLED: bool = True
     TRAEFIK_SYNC_INTERVAL_MINUTES: int = 15
-    TRAEFIK_SYNC_TARGET_VM_ID: int = 7
 
     # Persistent Storage
     SQLITE_DB_PATH: str = "/data/orchestrator.db"

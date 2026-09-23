@@ -39,3 +39,48 @@ async def require_api_key(api_key: Optional[str] = Security(api_key_header)):
             detail="Invalid or missing API key"
         )
     return True
+
+
+VALID_SSH_KEY_PREFIXES = (
+    "ssh-rsa",
+    "ssh-dss",
+    "ssh-ed25519",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "sk-ssh-ed25519@openssh.com",
+    "sk-ecdsa-sha2-nistp256@openssh.com",
+)
+
+
+def sanitize_ssh_public_keys(raw_keys: Optional[str]) -> Optional[str]:
+    """
+    Sanitizes, deduplicates, and validates OpenSSH public keys.
+    Filters out empty lines, comments, and non-standard key formats to prevent hypervisor API errors.
+    Returns clean, newline-separated OpenSSH public keys or None if empty.
+    """
+    if not raw_keys or not str(raw_keys).strip():
+        return None
+
+    import urllib.parse
+    clean_keys = []
+    seen = set()
+
+    # Decode in case input was previously URL-encoded
+    decoded = urllib.parse.unquote(str(raw_keys))
+
+    for line in decoded.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) >= 2 and any(parts[0] == prefix or parts[0].startswith(prefix) for prefix in VALID_SSH_KEY_PREFIXES):
+            # Key body is type + base64 data (optionally preserve comment if present)
+            normalized = f"{parts[0]} {parts[1]}" + (f" {parts[2]}" if len(parts) >= 3 else "")
+            if normalized not in seen:
+                seen.add(normalized)
+                clean_keys.append(normalized)
+
+    if clean_keys:
+        return "\n".join(clean_keys)
+    return None

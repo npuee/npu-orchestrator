@@ -6,6 +6,7 @@ from pathlib import Path
 
 from app.core.config import settings
 from app.core.app_config import app_config
+from app.core.security import sanitize_ssh_public_keys
 from app.drivers.proxmox.client import ProxmoxClientManager
 from app.drivers.proxmox.templates import ProxmoxTemplateManager
 
@@ -20,34 +21,9 @@ class ProxmoxQemuManager:
         self.template_mgr = template_mgr
 
     def _resolve_ssh_key(self, provided_key: Optional[str] = None) -> Optional[str]:
-        """Resolves SSH key string from parameter, file, or default configuration."""
-        key_list = []
-        if provided_key and provided_key.strip():
-            key_list.extend(line.strip() for line in provided_key.strip().splitlines() if line.strip())
-        elif settings.DEFAULT_SSH_KEY and settings.DEFAULT_SSH_KEY.strip():
-            key_list.extend(line.strip() for line in settings.DEFAULT_SSH_KEY.strip().splitlines() if line.strip())
-
-        # Check configured key file if provided
-        if settings.DEFAULT_SSH_KEY_FILE:
-            try:
-                p = Path(settings.DEFAULT_SSH_KEY_FILE)
-                if p.exists() and p.is_file():
-                    content = p.read_text(encoding="utf-8")
-                    key_list.extend(line.strip() for line in content.splitlines() if line.strip() and not line.strip().startswith("#"))
-            except Exception as e:
-                logger.debug("Could not read SSH key file %s: %s", settings.DEFAULT_SSH_KEY_FILE, e)
-
-        # Deduplicate keys while preserving order
-        seen = set()
-        unique_keys = []
-        for k in key_list:
-            if k not in seen:
-                seen.add(k)
-                unique_keys.append(k)
-
-        if unique_keys:
-            return "\n".join(unique_keys)
-        return None
+        """Resolves, deduplicates, and sanitizes OpenSSH public keys from parameter or settings."""
+        raw = provided_key or settings.DEFAULT_SSH_KEY
+        return sanitize_ssh_public_keys(raw)
 
     def clone_linux_vm(
         self,

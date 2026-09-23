@@ -13,19 +13,16 @@
 
 version: "1.0"
 
-# ── NetBox Default Assignments ─────────────────────────────────────────────────
-# These IDs are used when provisioning a new VM or container.
-# They are automatically populated when you run ./install.sh
-# You can find IDs in NetBox by navigating to the object and checking the URL.
+# ── NetBox Multi-Site & Multi-Cluster Guard Rails ─────────────────────────────
+# Limits webhook orchestration to workloads matching this cluster and site.
+# Infrastructure specifications (datastore, bridge, subnet, gateway, DNS, ssh_keys)
+# are managed declaratively in NetBox Config Context.
 defaults:
-  tenant_id: 1       # NetBox Tenant ID  (e.g. /tenancy/tenants/6/)
-  site_id: 1         # NetBox Site ID    (e.g. /dcim/sites/2/)
-  cluster_id: 1      # NetBox Cluster ID (e.g. /virtualization/clusters/2/)
-  role_vm_id: 16     # Role ID for Virtual Machines
-  role_lxc_id: 15    # Role ID for LXC Containers
-  storage: "local-zfs"  # Proxmox storage pool name (fallback if not set per-cluster)
-  bridge: "vmbr0"         # Proxmox network bridge name (fallback if not set per-cluster)
-  subnet: "192.168.1.0/24"  # Default fallback subnet for IPAM allocations
+  cluster_id: 1           # NetBox Cluster ID managed by this orchestrator instance
+  site_id: 1              # NetBox Site ID (e.g. /dcim/sites/1/)
+  storage: "local-zfs"    # Proxmox storage pool (fallback if missing in Config Context)
+  bridge: "vmbr0"         # Network bridge (fallback if missing in Config Context)
+  subnet: "192.168.1.0/24"# Subnet for IPAM (fallback if missing in Config Context)
 
 # ── Hardware Fallbacks ────────────────────────────────────────────────────────
 # Emergency default specs if a VM is created without a VM Type and blank sliders.

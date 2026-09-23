@@ -108,7 +108,7 @@ async def run_linux_provision_task(
             await netbox_driver.update_virtual_machine(
                 vm_id=netbox_vm_id,
                 status="active",
-                custom_fields={"proxmox_vmid": vmid},
+                custom_fields={"proxmox_vmid": vmid, "proxmox_node": result.get("node")},
                 comments=f"Provisioned via NPU Orchestrator. Proxmox VMID: {vmid}, IP: {ip_addr}",
             )
             await netbox_driver.add_journal_entry(
@@ -230,7 +230,7 @@ async def run_windows_provision_task(
             await netbox_driver.update_virtual_machine(
                 vm_id=netbox_vm_id,
                 status="active",
-                custom_fields={"proxmox_vmid": vmid},
+                custom_fields={"proxmox_vmid": vmid, "proxmox_node": result.get("node")},
                 comments=f"Provisioned via NPU Orchestrator. Proxmox VMID: {vmid}, IP: {ip_addr}",
             )
             await netbox_driver.add_journal_entry(
@@ -354,7 +354,7 @@ async def run_lxc_provision_task(
             await netbox_driver.update_virtual_machine(
                 vm_id=netbox_vm_id,
                 status="active",
-                custom_fields={"proxmox_vmid": vmid},
+                custom_fields={"proxmox_vmid": vmid, "proxmox_node": result.get("node")},
                 comments=f"Provisioned LXC Container. Proxmox CT ID: {vmid}, IP: {ip_addr}",
             )
             await netbox_driver.add_journal_entry(

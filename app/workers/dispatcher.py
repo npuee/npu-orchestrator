@@ -28,6 +28,171 @@ logger = logging.getLogger("orchestrator.workers.dispatcher")
 # In-flight provisioning lock
 _active_provisioning_vms = set()
 
+TELEMETRY_CUSTOM_FIELDS = {
+    "cpu_usage",
+    "memory_usage",
+    "disk_usage",
+    "uptime",
+    "guest_agent",
+    "metrics_updated",
+    "kuma_monitor_id",
+}
+
+IGNORED_TOP_LEVEL_KEYS = {
+    "last_updated",
+    "created",
+}
+
+def _normalize_status(val: Any) -> Optional[str]:
+    if isinstance(val, dict):
+        s = val.get("value") or val.get("label")
+        return str(s).strip().lower() if s is not None else None
+    elif val is not None:
+        return str(val).strip().lower()
+    return None
+
+def _normalize_ip(obj: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not isinstance(obj, dict):
+        return None
+    ip_data = obj.get("primary_ip4") or obj.get("primary_ip")
+    if isinstance(ip_data, dict):
+        addr = ip_data.get("address", "")
+        return addr.split("/")[0].strip() if addr else None
+    elif isinstance(ip_data, str):
+        return ip_data.split("/")[0].strip() if ip_data else None
+    return None
+
+def _normalize_vm_type_id(val: Any) -> Optional[int]:
+    if isinstance(val, dict):
+        v = val.get("id")
+        return int(v) if v is not None else None
+    elif val is not None:
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+def _normalize_start_on_boot(val: Any) -> Optional[bool]:
+    if isinstance(val, dict):
+        v = val.get("value")
+        return v != "off" if v is not None else None
+    elif isinstance(val, str):
+        return val.lower() not in ("off", "false", "0")
+    elif isinstance(val, bool):
+        return val
+    return None
+
+def extract_vm_deltas(pre: Optional[Dict[str, Any]], post: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Computes fine-grained differences between NetBox prechange and postchange snapshots.
+    Identifies if an update is purely a background telemetry/metric echo, or if it
+    contains actionable power state transitions, hardware slider changes, name changes, or IP changes.
+    """
+    if not isinstance(pre, dict) or not isinstance(post, dict):
+        return {
+            "has_snapshots": False,
+            "status_changed": True,
+            "hardware_changed": True,
+            "ip_changed": False,
+            "is_telemetry_only": False,
+            "old_status": None,
+            "new_status": None,
+            "old_ip": None,
+            "new_ip": None,
+            "changed_fields": [],
+        }
+
+    # 1. Power State Delta
+    old_status = _normalize_status(pre.get("status"))
+    new_status = _normalize_status(post.get("status"))
+    status_changed = bool(old_status and new_status and old_status != new_status)
+
+    # 2. IP Delta
+    old_ip = _normalize_ip(pre) or str((pre.get("custom_fields") or {}).get("requested_ip") or "").split("/")[0].strip() or None
+    new_ip = _normalize_ip(post) or str((post.get("custom_fields") or {}).get("requested_ip") or "").split("/")[0].strip() or None
+    ip_changed = bool(new_ip and old_ip != new_ip)
+
+    # 3. Hardware Specs & Identity Deltas
+    pre_cf = pre.get("custom_fields") or {}
+    post_cf = post.get("custom_fields") or {}
+
+    name_changed = pre.get("name") != post.get("name")
+    vcpus_changed = pre.get("vcpus") != post.get("vcpus")
+    memory_changed = pre.get("memory") != post.get("memory")
+    disk_changed = (
+        pre.get("disk") != post.get("disk")
+        or pre_cf.get("disk_size_gb") != post_cf.get("disk_size_gb")
+    )
+    type_changed = _normalize_vm_type_id(pre.get("virtual_machine_type")) != _normalize_vm_type_id(post.get("virtual_machine_type"))
+    onboot_changed = _normalize_start_on_boot(pre.get("start_on_boot")) != _normalize_start_on_boot(post.get("start_on_boot"))
+    node_changed = pre_cf.get("proxmox_node") != post_cf.get("proxmox_node")
+
+    hardware_changed = any([
+        name_changed,
+        vcpus_changed,
+        memory_changed,
+        disk_changed,
+        type_changed,
+        onboot_changed,
+        node_changed,
+    ])
+
+    # 4. Telemetry-Only Inspection
+    changed_fields = []
+    all_keys = set(pre.keys()).union(set(post.keys()))
+    non_telemetry_changes = False
+
+    if status_changed:
+        non_telemetry_changes = True
+        changed_fields.append(f"status: {old_status} -> {new_status}")
+    if ip_changed:
+        non_telemetry_changes = True
+        changed_fields.append(f"primary_ip: {old_ip} -> {new_ip}")
+    if hardware_changed:
+        non_telemetry_changes = True
+        if name_changed: changed_fields.append(f"name: {pre.get('name')} -> {post.get('name')}")
+        if vcpus_changed: changed_fields.append(f"vcpus: {pre.get('vcpus')} -> {post.get('vcpus')}")
+        if memory_changed: changed_fields.append(f"memory: {pre.get('memory')} -> {post.get('memory')}")
+        if disk_changed: changed_fields.append("disk")
+        if type_changed: changed_fields.append("virtual_machine_type")
+        if onboot_changed: changed_fields.append("start_on_boot")
+        if node_changed: changed_fields.append("proxmox_node")
+
+    cf_keys = set(pre_cf.keys()).union(set(post_cf.keys()))
+    cf_telemetry_changes = []
+    for k in cf_keys:
+        if pre_cf.get(k) != post_cf.get(k):
+            if k in TELEMETRY_CUSTOM_FIELDS:
+                cf_telemetry_changes.append(k)
+            elif k not in ("proxmox_node", "disk_size_gb", "requested_ip"):
+                non_telemetry_changes = True
+                changed_fields.append(f"custom_fields.{k}")
+
+    for k in all_keys:
+        if k in ("custom_fields", "status", "primary_ip4", "primary_ip", "name", "vcpus", "memory", "disk", "virtual_machine_type", "start_on_boot"):
+            continue
+        if k in IGNORED_TOP_LEVEL_KEYS:
+            continue
+        if pre.get(k) != post.get(k):
+            non_telemetry_changes = True
+            changed_fields.append(k)
+
+    is_telemetry_only = bool(cf_telemetry_changes and not non_telemetry_changes)
+
+    return {
+        "has_snapshots": True,
+        "status_changed": status_changed,
+        "hardware_changed": hardware_changed,
+        "ip_changed": ip_changed,
+        "is_telemetry_only": is_telemetry_only,
+        "old_status": old_status,
+        "new_status": new_status,
+        "old_ip": old_ip,
+        "new_ip": new_ip,
+        "changed_fields": changed_fields or cf_telemetry_changes,
+    }
+
 async def process_netbox_webhook_event(job_id: str, payload: Dict[str, Any]):
     """
     Parses incoming NetBox webhook data and dispatches the corresponding provisioning, sync, or deprovisioning task.
@@ -172,7 +337,7 @@ async def process_netbox_webhook_event(job_id: str, payload: Dict[str, Any]):
         )
         return
 
-    # 3. Existing VM: Power State Synchronization & Hardware/Name Synchronization
+    # 3. Existing VM: Power State Synchronization, Hardware/Name Synchronization & Dynamic DNS
     if existing_vmid:
         node = custom_fields.get("proxmox_node")
         if not node and "device" in data and isinstance(data["device"], dict):
@@ -199,101 +364,163 @@ async def process_netbox_webhook_event(job_id: str, payload: Dict[str, Any]):
             raw_ip = str(custom_fields["requested_ip"]).strip()
             primary_ip = raw_ip.split("/")[0] if raw_ip else None
 
-        # A) Power State Synchronization
-        if status_val.lower() in ("offline", "stopped"):
-            await db.append_log(job_id, f"VM '{hostname}' status is 'offline'. Synchronizing power state -> STOP (disabling onboot)...")
-            await run_power_sync_task(
-                job_id=job_id,
-                vmid=int(existing_vmid),
-                hostname=hostname,
-                target_state="stop",
-                node=node,
-                desired_onboot=False,
-                netbox_vm_id=netbox_vm_id,
+        # Extract deltas between prechange and postchange snapshots
+        snapshots = payload.get("snapshots") or {}
+        pre_snapshot = snapshots.get("prechange") if isinstance(snapshots, dict) else None
+        post_snapshot = snapshots.get("postchange") if isinstance(snapshots, dict) else None
+        deltas = extract_vm_deltas(pre_snapshot, post_snapshot)
+
+        # Drop pure telemetry/metrics echoes in <1ms without calling Proxmox
+        if deltas.get("is_telemetry_only"):
+            ch_fields = deltas.get("changed_fields", [])
+            await db.append_log(
+                job_id,
+                f"VM '{hostname}' (VMID: {existing_vmid}) update contains only telemetry/metrics delta ({', '.join(ch_fields)}). Dropping echo webhook in <1ms.",
             )
-        elif status_val.lower() in ("active", "running"):
-            await db.append_log(job_id, f"VM '{hostname}' status is 'active'. Synchronizing power state -> START (enabling onboot)...")
-            await run_power_sync_task(
-                job_id=job_id,
-                vmid=int(existing_vmid),
-                hostname=hostname,
-                target_state="start",
-                node=node,
-                desired_onboot=True,
-                netbox_vm_id=netbox_vm_id,
+            await db.update_job(job_id, status="completed", vmid=int(existing_vmid), hostname=hostname)
+            return
+
+        # Dynamic DNS reconciliation if primary IP changed
+        if deltas.get("ip_changed"):
+            new_ip = deltas.get("new_ip") or primary_ip
+            old_ip = deltas.get("old_ip")
+            dns_zone = app_config.dns.get("default_zone", "homelab.local")
+            await db.append_log(
+                job_id,
+                f"VM '{hostname}' primary IP changed from '{old_ip}' to '{new_ip}'. Updating NetBox DNS (A & PTR) in zone '{dns_zone}'...",
             )
-
-        # B) Hardware Specs & Name Synchronization (name, cores, RAM, disk, onboot)
-        raw_disk = data.get("disk") or custom_fields.get("disk_size_gb")
-        disk_size_gb = None
-        if raw_disk:
             try:
-                d_val = int(raw_disk)
-                disk_size_gb = d_val // 1024 if d_val >= 1024 else d_val
-            except (ValueError, TypeError):
-                pass
-
-        raw_cores = data.get("vcpus")
-        cores = int(raw_cores) if raw_cores else None
-
-        raw_memory = data.get("memory")
-        memory_mb = None
-        if raw_memory:
-            try:
-                m_val = int(raw_memory)
-                memory_mb = m_val * 1024 if m_val < 128 else m_val
-            except (ValueError, TypeError):
-                pass
-
-        # Check if Virtual Machine Type changed on an existing VM
-        snapshots = payload.get("snapshots", {})
-        pre_type = snapshots.get("prechange", {}).get("virtual_machine_type")
-        post_type = snapshots.get("postchange", {}).get("virtual_machine_type") or data.get("virtual_machine_type")
-
-        pre_type_id = pre_type.get("id") if isinstance(pre_type, dict) else pre_type
-        post_type_id = post_type.get("id") if isinstance(post_type, dict) else post_type
-
-        if post_type_id and pre_type_id != post_type_id:
-            try:
-                vm_type_obj = await netbox_driver.get_virtual_machine_type(int(post_type_id))
-                if vm_type_obj:
-                    type_name = vm_type_obj.get("name", "")
-                    def_vcpus = vm_type_obj.get("default_vcpus")
-                    def_mem = vm_type_obj.get("default_memory")
-                    await db.append_log(
-                        job_id,
-                        f"Virtual Machine Type changed to '{type_name}' (Default: {def_vcpus} vCPUs, {def_mem} MB RAM). Scaling VM specs...",
-                    )
-                    if def_vcpus:
-                        cores = int(def_vcpus)
-                    if def_mem:
-                        memory_mb = int(def_mem)
-                    # Update NetBox VM fields so the numbers reflect the new type
+                dns_ok = await netbox_driver.create_or_update_dns_record(
+                    hostname=hostname,
+                    ip_address=new_ip,
+                    zone_name=dns_zone,
+                )
+                if dns_ok:
+                    await db.append_log(job_id, f"Successfully reconciled NetBox DNS records for '{hostname}.{dns_zone}' -> {new_ip}")
                     if netbox_vm_id:
-                        await netbox_driver.update_virtual_machine(
-                            vm_id=netbox_vm_id,
-                            vcpus=cores,
-                            memory=memory_mb,
+                        await netbox_driver.add_journal_entry(
+                            assigned_object_type="virtualization.virtualmachine",
+                            assigned_object_id=netbox_vm_id,
+                            comment=f"Primary IP updated from {old_ip} to {new_ip}. Reconciled DNS A and PTR records in zone '{dns_zone}'. (Job ID: {job_id})",
                         )
-            except Exception as exc:
-                logger.warning("Could not apply blueprint defaults for type %s: %s", post_type_id, exc)
+                    await notifier.notify_job_success(
+                        job_id,
+                        "vm_ip_changed",
+                        {"vmid": int(existing_vmid), "hostname": hostname, "old_ip": old_ip, "new_ip": new_ip},
+                    )
+            except Exception as e:
+                logger.warning("Could not reconcile DNS records for %s: %s", hostname, e)
+                await db.append_log(job_id, f"Warning: Failed to reconcile DNS for '{hostname}': {e}")
 
-        # If the VM is offline, onboot=0; if active, onboot=1
-        effective_onboot = 0 if status_val.lower() in ("offline", "stopped") else 1
+        # A) Power State Synchronization (only if status actually changed or snapshots absent)
+        power_task_ran = False
+        if deltas.get("status_changed", True):
+            if status_val.lower() in ("offline", "stopped"):
+                await db.append_log(job_id, f"VM '{hostname}' status changed to 'offline'. Synchronizing power state -> STOP (disabling onboot)...")
+                await run_power_sync_task(
+                    job_id=job_id,
+                    vmid=int(existing_vmid),
+                    hostname=hostname,
+                    target_state="stop",
+                    node=node,
+                    desired_onboot=False,
+                    netbox_vm_id=netbox_vm_id,
+                )
+                power_task_ran = True
+            elif status_val.lower() in ("active", "running"):
+                await db.append_log(job_id, f"VM '{hostname}' status changed to 'active'. Synchronizing power state -> START (enabling onboot)...")
+                await run_power_sync_task(
+                    job_id=job_id,
+                    vmid=int(existing_vmid),
+                    hostname=hostname,
+                    target_state="start",
+                    node=node,
+                    desired_onboot=True,
+                    netbox_vm_id=netbox_vm_id,
+                )
+                power_task_ran = True
 
-        await db.append_log(job_id, f"Checking hardware & name configuration for '{hostname}' (VMID: {existing_vmid})...")
-        await run_vm_sync_task(
-            job_id=job_id,
-            vmid=int(existing_vmid),
-            hostname=hostname,
-            node=node,
-            onboot=effective_onboot,
-            cores=cores,
-            memory_mb=memory_mb,
-            disk_size_gb=disk_size_gb,
-            netbox_vm_id=netbox_vm_id,
-            ip_address=primary_ip,
-        )
+        # B) Hardware Specs & Name Synchronization (only if hardware specs changed or snapshots absent)
+        vm_sync_ran = False
+        if deltas.get("hardware_changed", True):
+            raw_disk = data.get("disk") or custom_fields.get("disk_size_gb")
+            disk_size_gb = None
+            if raw_disk:
+                try:
+                    d_val = int(raw_disk)
+                    disk_size_gb = d_val // 1024 if d_val >= 1024 else d_val
+                except (ValueError, TypeError):
+                    pass
+
+            raw_cores = data.get("vcpus")
+            cores = int(raw_cores) if raw_cores else None
+
+            raw_memory = data.get("memory")
+            memory_mb = None
+            if raw_memory:
+                try:
+                    m_val = int(raw_memory)
+                    memory_mb = m_val * 1024 if m_val < 128 else m_val
+                except (ValueError, TypeError):
+                    pass
+
+            # Check if Virtual Machine Type changed on an existing VM
+            pre_type = pre_snapshot.get("virtual_machine_type") if pre_snapshot else None
+            post_type = post_snapshot.get("virtual_machine_type") if post_snapshot else data.get("virtual_machine_type")
+
+            pre_type_id = pre_type.get("id") if isinstance(pre_type, dict) else pre_type
+            post_type_id = post_type.get("id") if isinstance(post_type, dict) else post_type
+
+            if post_type_id and pre_type_id != post_type_id:
+                try:
+                    vm_type_obj = await netbox_driver.get_virtual_machine_type(int(post_type_id))
+                    if vm_type_obj:
+                        type_name = vm_type_obj.get("name", "")
+                        def_vcpus = vm_type_obj.get("default_vcpus")
+                        def_mem = vm_type_obj.get("default_memory")
+                        await db.append_log(
+                            job_id,
+                            f"Virtual Machine Type changed to '{type_name}' (Default: {def_vcpus} vCPUs, {def_mem} MB RAM). Scaling VM specs...",
+                        )
+                        if def_vcpus:
+                            cores = int(def_vcpus)
+                        if def_mem:
+                            memory_mb = int(def_mem)
+                        # Update NetBox VM fields so the numbers reflect the new type
+                        if netbox_vm_id:
+                            await netbox_driver.update_virtual_machine(
+                                vm_id=netbox_vm_id,
+                                vcpus=cores,
+                                memory=memory_mb,
+                            )
+                except Exception as exc:
+                    logger.warning("Could not apply blueprint defaults for type %s: %s", post_type_id, exc)
+
+            # If the VM is offline, onboot=0; if active, onboot=1
+            effective_onboot = 0 if status_val.lower() in ("offline", "stopped") else 1
+
+            await db.append_log(job_id, f"Checking hardware & name configuration for '{hostname}' (VMID: {existing_vmid})...")
+            await run_vm_sync_task(
+                job_id=job_id,
+                vmid=int(existing_vmid),
+                hostname=hostname,
+                node=node,
+                onboot=effective_onboot,
+                cores=cores,
+                memory_mb=memory_mb,
+                disk_size_gb=disk_size_gb,
+                netbox_vm_id=netbox_vm_id,
+                ip_address=primary_ip,
+            )
+            vm_sync_ran = True
+
+        if not power_task_ran and not vm_sync_ran:
+            await db.append_log(
+                job_id,
+                f"VM '{hostname}' (VMID: {existing_vmid}) update did not change power state or hardware specs. No Proxmox action required.",
+            )
+            await db.update_job(job_id, status="completed", vmid=int(existing_vmid), hostname=hostname)
+
         return
 
     # Guard: do NOT provision VMs that are in offline, failed, or decommissioning status, or tagged decommissioned

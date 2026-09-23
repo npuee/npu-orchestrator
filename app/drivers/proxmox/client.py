@@ -4,6 +4,7 @@ import re
 from typing import Optional, List, Dict, Any, Callable
 from proxmoxer import ProxmoxAPI
 from app.core.config import settings
+from app.core.exceptions import ProxmoxTaskFailedError, ProxmoxTaskTimeoutError
 
 logger = logging.getLogger("orchestrator.proxmox.client")
 
@@ -63,7 +64,7 @@ class ProxmoxClientManager:
                 if exit_status == "OK" or (isinstance(exit_status, str) and exit_status.startswith("WARNINGS")):
                     logger.info("Task %s completed successfully (status: %s)", upid, exit_status)
                     return True
-                raise RuntimeError(f"Proxmox task {upid} failed with exitstatus: {exit_status}")
+                raise ProxmoxTaskFailedError(upid=upid, exit_status=str(exit_status), node=node)
 
             now = time.time()
             if (log_callback or progress_callback) and (now - last_log_check >= 5.0):
@@ -95,7 +96,7 @@ class ProxmoxClientManager:
 
             time.sleep(poll_interval)
 
-        raise TimeoutError(f"Proxmox task {upid} timed out after {timeout} seconds")
+        raise ProxmoxTaskTimeoutError(upid=upid, timeout_seconds=timeout, node=node)
 
     def get_next_vmid(self) -> int:
         """Fetches the next available VMID in the cluster."""

@@ -2,6 +2,7 @@ import logging
 import re
 from typing import Optional, List, Dict, Any, Tuple
 from app.drivers.proxmox.client import ProxmoxClientManager
+from app.core.exceptions import TemplateNotFoundError
 
 logger = logging.getLogger("orchestrator.proxmox.templates")
 
@@ -70,7 +71,7 @@ class ProxmoxTemplateManager:
             if linux_matches:
                 chosen = linux_matches[-1]
                 return chosen["vmid"], chosen["name"]
-            raise ValueError("No Linux templates starting with 90 found on Proxmox node")
+            raise TemplateNotFoundError("starting with 90", category="linux", node=node)
 
         elif category == "windows":
             win_matches = [t for t in templates if str(t["vmid"]).startswith("92") or t["category"] == "windows"]
@@ -80,7 +81,7 @@ class ProxmoxTemplateManager:
             logger.warning("No Windows templates starting with 92 found, falling back to 9225")
             return 9225, "Default Windows Template"
 
-        raise ValueError(f"Unknown template category '{category}'")
+        raise TemplateNotFoundError(f"category '{category}'", category=category, node=node)
 
     def resolve_template_for_platform(
         self,

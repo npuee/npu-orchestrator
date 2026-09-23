@@ -1,9 +1,11 @@
 import logging
 import uvicorn
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from app import __version__
 from app.core.config import settings
+from app.core.exceptions import OrchestratorException
 from app.storage.db import db
 from app.api.v1.webhooks import router as webhooks_router
 from app.api.v1.provision import router as provision_router
@@ -183,6 +185,20 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+# Global Domain Exception Handler
+@app.exception_handler(OrchestratorException)
+async def orchestrator_exception_handler(request: Request, exc: OrchestratorException):
+    logger.warning("Handled domain exception [%s] on %s: %s", exc.error_code, request.url.path, exc.message)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "status": "error",
+            "error_code": exc.error_code,
+            "message": exc.message,
+            "details": exc.details,
+        },
+    )
 
 # Include API v1 Routers
 app.include_router(webhooks_router, prefix="/api/v1")

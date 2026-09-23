@@ -30,3 +30,10 @@ async def get_next_vmid():
     except Exception as e:
         logger.error("Failed to query next VMID: %s", e)
         raise HTTPException(status_code=502, detail=f"Failed to query Proxmox cluster nextid: {e}")
+
+
+@router.get("/default/{category}", summary="Get default template for category")
+async def get_default_template(category: str, node: Optional[str] = Query(None)):
+    """Returns the default/latest template for Linux or Windows."""
+    vmid, name = proxmox_driver.find_default_template(category, node)
+    return {"category": category, "vmid": vmid, "name": name}

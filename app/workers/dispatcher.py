@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import re
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple, List
 
 from app.core.config import settings
 from app.core.app_config import app_config
@@ -116,6 +116,9 @@ def extract_vm_deltas(pre: Optional[Dict[str, Any]], post: Optional[Dict[str, An
     # 3. Hardware Specs & Identity Deltas
     pre_cf = pre.get("custom_fields") or {}
     post_cf = post.get("custom_fields") or {}
+    pre_vmid = pre_cf.get("proxmox_vmid")
+    post_vmid = post_cf.get("proxmox_vmid")
+    is_provisioning_writeback = bool(not pre_vmid and post_vmid)
 
     name_changed = pre.get("name") != post.get("name")
     vcpus_changed = pre.get("vcpus") != post.get("vcpus")
@@ -126,7 +129,7 @@ def extract_vm_deltas(pre: Optional[Dict[str, Any]], post: Optional[Dict[str, An
     )
     type_changed = _normalize_vm_type_id(pre.get("virtual_machine_type")) != _normalize_vm_type_id(post.get("virtual_machine_type"))
     onboot_changed = _normalize_start_on_boot(pre.get("start_on_boot")) != _normalize_start_on_boot(post.get("start_on_boot"))
-    node_changed = pre_cf.get("proxmox_node") != post_cf.get("proxmox_node")
+    node_changed = bool(pre_vmid) and (pre_cf.get("proxmox_node") != post_cf.get("proxmox_node"))
 
     hardware_changed = any([
         name_changed,
@@ -186,12 +189,265 @@ def extract_vm_deltas(pre: Optional[Dict[str, Any]], post: Optional[Dict[str, An
         "hardware_changed": hardware_changed,
         "ip_changed": ip_changed,
         "is_telemetry_only": is_telemetry_only,
+        "is_provisioning_writeback": is_provisioning_writeback,
         "old_status": old_status,
         "new_status": new_status,
         "old_ip": old_ip,
         "new_ip": new_ip,
         "changed_fields": changed_fields or cf_telemetry_changes,
     }
+
+
+async def validate_vm_creation_blueprint(
+    job_id: str,
+    data: Dict[str, Any],
+    cfg_ctx: Dict[str, Any],
+    custom_fields: Dict[str, Any],
+    primary_ip: Optional[str] = None,
+    netbox_vm_id: Optional[int] = None,
+) -> Tuple[bool, List[str], Dict[str, Any]]:
+    """
+    Declarative pre-flight validation for VM and Container provisioning.
+    Validates required parameters across NetBox object fields, custom fields, and NetBox Config Context.
+    If required attributes are missing or invalid, posts a formatted failure entry to the NetBox Journal
+    and marks the job failed without executing commands on Proxmox.
+    """
+    hostname = data.get("name")
+    missing_errors: List[str] = []
+
+    # 1. Target Proxmox Node
+    node = custom_fields.get("proxmox_node")
+    if not node and data.get("device") and isinstance(data["device"], dict):
+        dev_name = data["device"].get("name", "")
+        if "proxmox" in dev_name.lower():
+            node = dev_name.split(".")[0] if "." in dev_name else dev_name
+    if not node and cfg_ctx.get("default_node"):
+        node = cfg_ctx.get("default_node")
+
+    if not node:
+        missing_errors.append(
+            "- **Target Node**: No Proxmox node specified (expected `default_node` in NetBox Config Context or custom field `proxmox_node`)."
+        )
+
+    # 2. Workload Classification (LXC vs QEMU)
+    platform_name = ""
+    platform_slug = ""
+    platform_desc = ""
+    if data.get("platform") and isinstance(data["platform"], dict):
+        platform_name = data["platform"].get("name", "")
+        platform_slug = data["platform"].get("slug", "")
+        platform_desc = data["platform"].get("description", "")
+
+    role_slug = ""
+    role_name = ""
+    if data.get("role") and isinstance(data["role"], dict):
+        role_slug = data["role"].get("slug", "")
+        role_name = data["role"].get("name", "")
+
+    vm_t = data.get("virtual_machine_type") or {}
+    vm_type_slug = vm_t.get("slug", "") if isinstance(vm_t, dict) else ""
+    vm_type_name = vm_t.get("name", "") if isinstance(vm_t, dict) else ""
+
+    is_lxc = (
+        role_slug == "lxc-container"
+        or "lxc" in role_slug.lower()
+        or "container" in role_slug.lower()
+        or "lxc" in role_name.lower()
+        or platform_slug.startswith("pve-lxc-")
+        or "[Proxmox LXC Template:" in platform_desc
+        or "lxc" in platform_name.lower()
+        or "lxc" in vm_type_slug.lower()
+        or "lxc" in vm_type_name.lower()
+    )
+
+    # 3. OS Template Resolution
+    template_volid = None
+    template_id = None
+    template_name = ""
+    category = "linux"
+
+    if is_lxc:
+        m_lxc_desc = re.search(r"\[Proxmox LXC Template:\s*([^\]]+)\]", platform_desc or "")
+        template_volid = custom_fields.get("lxc_template") or (m_lxc_desc.group(1).strip() if m_lxc_desc else None)
+        if not template_volid and (platform_slug or platform_name):
+            _, tpl_name, cat = proxmox_driver.resolve_template_for_platform(
+                platform_slug=platform_slug,
+                platform_name=platform_name,
+                platform_description=platform_desc,
+                requested_template_id=None,
+                node=node,
+            )
+            if cat == "lxc" and tpl_name:
+                template_volid = tpl_name
+        if not template_volid and node:
+            template_volid = proxmox_driver.find_lxc_template(node=node)
+        if not template_volid:
+            missing_errors.append(
+                f"- **OS Template (LXC)**: No valid Proxmox LXC template found for Platform '{platform_name or 'None'}'. "
+                "Ensure the Platform description contains `[Proxmox LXC Template: <volid>]` or custom field `lxc_template` is populated."
+            )
+        template_name = template_volid or ""
+    else:
+        template_id_override = int(custom_fields["template_id"]) if custom_fields.get("template_id") else None
+        tpl_id, tpl_name, cat = proxmox_driver.resolve_template_for_platform(
+            platform_slug=platform_slug,
+            platform_name=platform_name,
+            platform_description=platform_desc,
+            requested_template_id=template_id_override,
+            node=node,
+        )
+        template_id = tpl_id
+        template_name = tpl_name
+        category = cat or "linux"
+        if not template_id:
+            missing_errors.append(
+                f"- **OS Template (VM)**: Platform '{platform_name or 'None'}' does not map to a Proxmox VM template ID. "
+                "Ensure the Platform description contains `[Proxmox VM Template: <vmid>]` or custom field `template_id` is populated."
+            )
+
+    # 4. Storage Pool (Datastore)
+    storage = (
+        custom_fields.get("storage")
+        or cfg_ctx.get("datastore")
+        or cfg_ctx.get("storage")
+        or app_config.defaults.get("storage")
+    )
+    if not storage:
+        missing_errors.append(
+            "- **Storage Pool**: No storage datastore defined (expected `datastore` in NetBox Config Context or custom field `storage`)."
+        )
+
+    # 5. Network Bridge
+    bridge = (
+        custom_fields.get("bridge")
+        or cfg_ctx.get("bridge")
+        or app_config.defaults.get("bridge")
+    )
+    if not bridge:
+        missing_errors.append(
+            "- **Network Bridge**: No network bridge defined (expected `bridge` in NetBox Config Context or custom field `bridge`)."
+        )
+
+    # 6. IP Address / Subnet
+    if not primary_ip and not cfg_ctx.get("subnet") and not app_config.defaults.get("subnet"):
+        missing_errors.append(
+            "- **IP Address / Subnet**: No primary IP assigned and `subnet` is missing from NetBox Config Context for dynamic IPAM allocation."
+        )
+
+    # 7. Authentication / Credentials
+    ctx_ssh_keys = "\n".join(cfg_ctx.get("ssh_keys", [])) if cfg_ctx.get("ssh_keys") else None
+    lxc_ssh_key = custom_fields.get("ssh_key") or ctx_ssh_keys
+    lxc_password = custom_fields.get("admin_password") or app_config.templates.get("default_linux_password") or app_config.templates.get("default_password")
+    if is_lxc and not lxc_ssh_key and not lxc_password:
+        missing_errors.append(
+            "- **Authentication (LXC)**: No SSH public key or root password provided (expected `ssh_keys` in NetBox Config Context or custom field `ssh_key`/`admin_password`)."
+        )
+
+    # 8. Hardware Sizing
+    raw_disk = data.get("disk") or custom_fields.get("disk_size_gb")
+    disk_size_gb = None
+    if raw_disk:
+        try:
+            d_val = int(raw_disk)
+            disk_size_gb = d_val // 1024 if d_val >= 1024 else d_val
+        except (ValueError, TypeError): pass
+
+    raw_cores = data.get("vcpus")
+    cores = int(raw_cores) if raw_cores else None
+
+    raw_memory = data.get("memory")
+    memory_mb = None
+    if raw_memory:
+        try:
+            m_val = int(raw_memory)
+            memory_mb = m_val * 1024 if m_val < 128 else m_val
+        except (ValueError, TypeError): pass
+
+    if (not cores or not memory_mb or not disk_size_gb) and data.get("virtual_machine_type"):
+        if isinstance(vm_t, dict):
+            if not cores and vm_t.get("default_vcpus"):
+                try: cores = int(vm_t["default_vcpus"])
+                except (ValueError, TypeError): pass
+            if not memory_mb and vm_t.get("default_memory"):
+                try: memory_mb = int(vm_t["default_memory"])
+                except (ValueError, TypeError): pass
+            if not disk_size_gb and vm_t.get("default_disk"):
+                try: disk_size_gb = int(vm_t["default_disk"])
+                except (ValueError, TypeError): pass
+
+    fb = app_config.fallbacks
+    cores = cores or fb.get("cores", 2)
+    memory_mb = memory_mb or fb.get("memory_mb", 2048)
+    disk_size_gb = disk_size_gb or fb.get("disk_gb", 20)
+
+    # 9. Start on Boot
+    onboot = True
+    start_on_boot_data = data.get("start_on_boot")
+    if isinstance(start_on_boot_data, dict):
+        if start_on_boot_data.get("value") == "off":
+            onboot = False
+    elif isinstance(start_on_boot_data, str) and start_on_boot_data.lower() in ("off", "false", "0"):
+        onboot = False
+
+    # Check if validation passed
+    if missing_errors:
+        workload_kind = "LXC Container" if is_lxc else "Virtual Machine"
+        bullet_list = "\n".join(missing_errors)
+        journal_comment = (
+            f"❌ **Provisioning Pre-Flight Validation Failed** (Job ID: `{job_id}`)\n\n"
+            f"The {workload_kind} could not be provisioned because required parameters are missing or invalid:\n"
+            f"{bullet_list}\n\n"
+            f"**Remediation**:\n"
+            f"Please configure the missing attributes on the NetBox object or in its Config Context, then re-save to trigger provisioning."
+        )
+        if netbox_vm_id:
+            try:
+                await netbox_driver.add_journal_entry(
+                    assigned_object_type="virtualization.virtualmachine",
+                    assigned_object_id=netbox_vm_id,
+                    comment=journal_comment,
+                )
+            except Exception as j_err:
+                logger.warning("Could not post pre-flight validation failure to NetBox Journal: %s", j_err)
+
+        await db.append_log(
+            job_id,
+            f"Provisioning pre-flight validation failed for '{hostname}': {'; '.join(missing_errors)}"
+        )
+        await db.update_job(job_id, status="failed", hostname=hostname)
+        return False, missing_errors, {}
+
+    vmid = custom_fields.get("proxmox_vmid")
+    blueprint = {
+        "hostname": hostname,
+        "node": node,
+        "is_lxc": is_lxc,
+        "category": category,
+        "template_volid": template_volid,
+        "template_id": template_id,
+        "template_name": template_name,
+        "vmid": int(vmid) if vmid else None,
+        "primary_ip": primary_ip,
+        "storage": storage,
+        "bridge": bridge,
+        "cores": cores,
+        "memory_mb": memory_mb,
+        "disk_size_gb": disk_size_gb,
+        "onboot": onboot,
+        "gateway": cfg_ctx.get("gateway"),
+        "dns_server": cfg_ctx.get("dns_servers", [None])[0] if cfg_ctx.get("dns_servers") else None,
+        "dns_domain": cfg_ctx.get("domain") or cfg_ctx.get("dns_domain"),
+        "ssh_key": lxc_ssh_key if is_lxc else (custom_fields.get("ssh_key") or ctx_ssh_keys),
+        "ci_user": cfg_ctx.get("default_user") or "root",
+    }
+
+    await db.append_log(
+        job_id,
+        f"Pre-flight blueprint validated successfully: node='{node}', type='{'LXC' if is_lxc else category.upper()}', "
+        f"template='{template_volid or template_name}', storage='{storage}', bridge='{bridge}', ip='{primary_ip or 'dhcp'}'"
+    )
+    return True, [], blueprint
+
 
 async def process_netbox_webhook_event(job_id: str, payload: Dict[str, Any]):
     """
@@ -370,12 +626,36 @@ async def process_netbox_webhook_event(job_id: str, payload: Dict[str, Any]):
         post_snapshot = snapshots.get("postchange") if isinstance(snapshots, dict) else None
         deltas = extract_vm_deltas(pre_snapshot, post_snapshot)
 
+        # Drop initial provisioning completion write-back echoes in <1ms
+        if deltas.get("is_provisioning_writeback"):
+            await db.append_log(
+                job_id,
+                f"VM '{hostname}' update is the initial provisioning write-back (VMID: {existing_vmid}). Dropping echo webhook in <1ms.",
+            )
+            await db.update_job(job_id, status="completed", vmid=int(existing_vmid), hostname=hostname)
+            return
+
         # Drop pure telemetry/metrics echoes in <1ms without calling Proxmox
         if deltas.get("is_telemetry_only"):
             ch_fields = deltas.get("changed_fields", [])
             await db.append_log(
                 job_id,
                 f"VM '{hostname}' (VMID: {existing_vmid}) update contains only telemetry/metrics delta ({', '.join(ch_fields)}). Dropping echo webhook in <1ms.",
+            )
+            await db.update_job(job_id, status="completed", vmid=int(existing_vmid), hostname=hostname)
+            return
+
+        # Drop non-actionable metadata-only updates (e.g. tags, comments, description) in <1ms
+        if (
+            deltas.get("has_snapshots")
+            and not deltas.get("status_changed")
+            and not deltas.get("hardware_changed")
+            and not deltas.get("ip_changed")
+        ):
+            ch_fields = deltas.get("changed_fields", [])
+            await db.append_log(
+                job_id,
+                f"VM '{hostname}' (VMID: {existing_vmid}) update contains no actionable power, hardware, or network changes (delta: {', '.join(ch_fields) if ch_fields else 'none'}). Dropping webhook in <1ms.",
             )
             await db.update_job(job_id, status="completed", vmid=int(existing_vmid), hostname=hostname)
             return
@@ -574,7 +854,7 @@ async def process_netbox_webhook_event(job_id: str, payload: Dict[str, Any]):
     try:
         # Extract NetBox Config Context early
         cfg_ctx = data.get("config_context") or {}
-        ctx_subnet = cfg_ctx.get("subnet")
+        ctx_subnet = cfg_ctx.get("subnet") or app_config.defaults.get("subnet")
 
         # Extract Primary IP / Requested IP
         primary_ip = None
@@ -587,7 +867,7 @@ async def process_netbox_webhook_event(job_id: str, payload: Dict[str, Any]):
             primary_ip = data["primary_ip"].get("address", "").split("/")[0]
 
         # Dynamic NetBox IPAM Next-Available-IP Allocation if no IP was provided
-        if not primary_ip:
+        if not primary_ip and ctx_subnet:
             allocated_ip = await netbox_driver.get_or_allocate_available_ip(
                 prefix_cidr=ctx_subnet,
                 hostname=hostname,
@@ -596,232 +876,83 @@ async def process_netbox_webhook_event(job_id: str, payload: Dict[str, Any]):
                 primary_ip = allocated_ip
                 await db.append_log(job_id, f"Auto-allocated next available IP from NetBox IPAM: {primary_ip}")
 
-        # Extract Platform details
-        platform_slug = ""
-        platform_name = ""
-        platform_desc = ""
-        if data.get("platform") and isinstance(data["platform"], dict):
-            platform_name = data["platform"].get("name", "")
-            platform_slug = data["platform"].get("slug", "")
-            platform_desc = data["platform"].get("description", "")
-
-        custom_fields = data.get("custom_fields", {})
-        template_id_override = int(custom_fields["template_id"]) if custom_fields.get("template_id") else None
-
-        # Detect Role & VM Type early for smart LXC classification
-        role_slug = ""
-        role_name = ""
-        if data.get("role") and isinstance(data["role"], dict):
-            role_slug = data["role"].get("slug", "")
-            role_name = data["role"].get("name", "")
-
-        vm_t = data.get("virtual_machine_type") or {}
-        vm_type_slug = vm_t.get("slug", "") if isinstance(vm_t, dict) else ""
-        vm_type_name = vm_t.get("name", "") if isinstance(vm_t, dict) else ""
-
-        # Smart LXC Auto-Detection: matches role, platform descriptor, or blueprint type
-        is_lxc = (
-            role_slug == "lxc-container"
-            or "lxc" in role_slug.lower()
-            or "container" in role_slug.lower()
-            or "lxc" in role_name.lower()
-            or platform_slug.startswith("pve-lxc-")
-            or "[Proxmox LXC Template:" in platform_desc
-            or "lxc" in platform_name.lower()
-            or "lxc" in vm_type_slug.lower()
-            or "lxc" in vm_type_name.lower()
+        # Declarative Pre-Flight Blueprint Validation (Config Context SSoT)
+        is_valid, validation_errors, bp = await validate_vm_creation_blueprint(
+            job_id=job_id,
+            data=data,
+            cfg_ctx=cfg_ctx,
+            custom_fields=custom_fields,
+            primary_ip=primary_ip,
+            netbox_vm_id=netbox_vm_id,
         )
 
-        # Auto-assign defaults if omitted (configured in config.yml)
-        defaults_cfg = app_config.defaults
-        defaults_to_patch = {}
-        if not data.get("tenant"):
-            defaults_to_patch["tenant"] = defaults_cfg.get("tenant_id", 1)
-        if not data.get("site"):
-            defaults_to_patch["site"] = defaults_cfg.get("site_id", 2)
-        if not data.get("cluster"):
-            defaults_to_patch["cluster"] = defaults_cfg.get("cluster_id", 2)
-        
-        if not data.get("role"):
-            defaults_to_patch["role"] = defaults_cfg.get("role_lxc_id", 15) if is_lxc else defaults_cfg.get("role_vm_id", 16)
-        elif is_lxc and role_slug in ("virtual-machine", "vm"):
-            # Auto-correct role to LXC Container if user selected an LXC platform
-            defaults_to_patch["role"] = defaults_cfg.get("role_lxc_id", 15)
+        if not is_valid:
+            # Pre-flight validation failed; errors were recorded to NetBox Journal and DB
+            return
 
-        if defaults_to_patch and netbox_vm_id:
-            try:
-                await netbox_driver.update_virtual_machine(
-                    vm_id=netbox_vm_id,
-                    tenant=defaults_to_patch.get("tenant"),
-                    site=defaults_to_patch.get("site"),
-                    cluster=defaults_to_patch.get("cluster"),
-                    role=defaults_to_patch.get("role"),
-                )
-                await db.append_log(job_id, f"Auto-assigned homelab defaults to NetBox VM/CT: {defaults_to_patch}")
-            except Exception as exc:
-                logger.warning("Could not auto-assign defaults to NetBox VM %d: %s", netbox_vm_id, exc)
-        
-        # 1. Resolve Target Proxmox Node
-        node = custom_fields.get("proxmox_node")
-        if not node and data.get("device") and isinstance(data["device"], dict):
-            dev_name = data["device"].get("name", "")
-            if "proxmox" in dev_name.lower():
-                node = dev_name.split(".")[0] if "." in dev_name else dev_name
-
-        vmid = custom_fields.get("proxmox_vmid")
-
-        # 2. Correlate NetBox Platform to Proxmox template
-        platform_desc = data.get("platform", {}).get("description", "") if isinstance(data.get("platform"), dict) else ""
-        resolved_tpl_id, resolved_tpl_name, category = proxmox_driver.resolve_template_for_platform(
-            platform_slug=platform_slug,
-            platform_name=platform_name,
-            platform_description=platform_desc,
-            requested_template_id=template_id_override,
-            node=node,
-        )
-
-        await db.append_log(
-            job_id,
-            f"Correlated Platform '{platform_name}' ({platform_slug}) -> Proxmox Template '{resolved_tpl_name}' (ID: {resolved_tpl_id}, Category: {category})"
-        )
-
-        # 3. Parse Hardware Specs
-        raw_disk = data.get("disk") or custom_fields.get("disk_size_gb")
-        disk_size_gb = None
-        if raw_disk:
-            try:
-                d_val = int(raw_disk)
-                disk_size_gb = d_val // 1024 if d_val >= 1024 else d_val
-            except (ValueError, TypeError):
-                pass
-
-        raw_cores = data.get("vcpus")
-        cores = int(raw_cores) if raw_cores else None
-
-        raw_memory = data.get("memory")
-        memory_mb = None
-        if raw_memory:
-            try:
-                m_val = int(raw_memory)
-                # If user entered in GB (e.g. 24), convert to MB (24576)
-                memory_mb = m_val * 1024 if m_val < 128 else m_val
-            except (ValueError, TypeError):
-                pass
-
-        # Resolve from Virtual Machine Type (User-managed hardware sizing in NetBox) if sliders were left empty
-        if (not cores or not memory_mb or not disk_size_gb) and data.get("virtual_machine_type"):
-            vm_t = data.get("virtual_machine_type")
-            if isinstance(vm_t, dict):
-                if not cores and vm_t.get("default_vcpus"):
-                    try: cores = int(vm_t["default_vcpus"])
-                    except (ValueError, TypeError): pass
-                if not memory_mb and vm_t.get("default_memory"):
-                    try: memory_mb = int(vm_t["default_memory"])
-                    except (ValueError, TypeError): pass
-                if not disk_size_gb and vm_t.get("default_disk"):
-                    try: disk_size_gb = int(vm_t["default_disk"])
-                    except (ValueError, TypeError): pass
-
-        # Apply global fallbacks from config.yml if still unassigned
-        fb = app_config.fallbacks
-        cores = cores or fb.get("cores", 2)
-        memory_mb = memory_mb or fb.get("memory_mb", 2048)
-        disk_size_gb = disk_size_gb or fb.get("disk_gb", 20)
-
-        # 4. Parse Start on Boot
-        onboot = True
-        start_on_boot_data = data.get("start_on_boot")
-        if isinstance(start_on_boot_data, dict):
-            if start_on_boot_data.get("value") == "off":
-                onboot = False
-        elif isinstance(start_on_boot_data, str) and start_on_boot_data.lower() in ("off", "false", "0"):
-            onboot = False
-
-        # Extract NetBox Config Context for cluster datastore/bridge, site networking and credentials
-        cfg_ctx = data.get("config_context") or {}
-        ctx_gateway = cfg_ctx.get("gateway")
-        ctx_dns = cfg_ctx.get("dns_servers", [None])[0] if cfg_ctx.get("dns_servers") else None
-        ctx_domain = cfg_ctx.get("domain") or cfg_ctx.get("dns_domain")
-        ctx_ssh_keys = "\n".join(cfg_ctx.get("ssh_keys", [])) if cfg_ctx.get("ssh_keys") else None
-        ctx_user = cfg_ctx.get("default_user")
-
-        # Cluster-aware datastore and network bridge (Cluster Config Context -> config.yml fallback)
-        ctx_storage = cfg_ctx.get("datastore") or cfg_ctx.get("storage") or defaults_cfg.get("storage", "zfs-storage")
-        ctx_bridge = cfg_ctx.get("bridge") or defaults_cfg.get("bridge", "vmbr0")
-        ctx_node = cfg_ctx.get("default_node")
-        if not node and ctx_node:
-            node = ctx_node
-
-        if cfg_ctx:
-            await db.append_log(
-                job_id,
-                f"Applied NetBox Config Context: datastore='{ctx_storage}', bridge='{ctx_bridge}', node='{node}', site='{cfg_ctx.get('site_name')}', gateway='{ctx_gateway}', dns='{ctx_dns}', user='{ctx_user}'",
-            )
-
-        if is_lxc:
-            m_lxc_desc = re.search(r"\[Proxmox LXC Template:\s*([^\]]+)\]", platform_desc or "")
-            lxc_volid = custom_fields.get("lxc_template") or (m_lxc_desc.group(1).strip() if m_lxc_desc else None)
+        # Execute provisioning based on validated blueprint
+        if bp["is_lxc"]:
             lxc_password = custom_fields.get("admin_password") or app_config.templates.get("default_linux_password") or app_config.templates.get("default_password")
             params = {
                 "hostname": hostname,
-                "template_volid": lxc_volid,
-                "node": node,
-                "vmid": int(vmid) if vmid else None,
-                "ip_address": primary_ip,
-                "gateway": ctx_gateway,
-                "dns_server": ctx_dns,
-                "dns_domain": ctx_domain,
-                "disk_size_gb": disk_size_gb or 20,
-                "cores": cores or 2,
-                "memory_mb": memory_mb or 2048,
+                "template_volid": bp["template_volid"],
+                "node": bp["node"],
+                "vmid": bp["vmid"],
+                "ip_address": bp["primary_ip"],
+                "gateway": bp["gateway"],
+                "dns_server": bp["dns_server"],
+                "dns_domain": bp["dns_domain"],
+                "disk_size_gb": bp["disk_size_gb"],
+                "cores": bp["cores"],
+                "memory_mb": bp["memory_mb"],
                 "swap_mb": int(custom_fields.get("swap_mb", 512)),
-                "onboot": onboot,
-                "ssh_key": custom_fields.get("ssh_key") or ctx_ssh_keys,
+                "onboot": bp["onboot"],
+                "ssh_key": bp["ssh_key"],
                 "password": lxc_password,
-                "storage": custom_fields.get("storage") or ctx_storage,
-                "bridge": custom_fields.get("bridge") or ctx_bridge,
+                "storage": bp["storage"],
+                "bridge": bp["bridge"],
                 "unprivileged": True,
                 "features": "nesting=1",
             }
             await run_lxc_provision_task(job_id, params, netbox_vm_id=netbox_vm_id)
-        elif category == "windows":
+        elif bp["category"] == "windows":
             admin_password = custom_fields.get("admin_password") or app_config.templates.get("default_windows_password", "P@ssw0rdInitial!")
             params = {
                 "hostname": hostname,
                 "admin_password": admin_password,
-                "template_id": resolved_tpl_id,
-                "node": node,
-                "vmid": int(vmid) if vmid else None,
-                "ip_address": primary_ip,
-                "gateway": ctx_gateway,
-                "dns_server": ctx_dns,
-                "dns_domain": ctx_domain,
-                "disk_size_gb": disk_size_gb or 32,
-                "cores": cores or 4,
-                "memory_mb": memory_mb or 8192,
-                "onboot": onboot,
-                "storage": custom_fields.get("storage") or ctx_storage,
-                "bridge": custom_fields.get("bridge") or ctx_bridge,
+                "template_id": bp["template_id"],
+                "node": bp["node"],
+                "vmid": bp["vmid"],
+                "ip_address": bp["primary_ip"],
+                "gateway": bp["gateway"],
+                "dns_server": bp["dns_server"],
+                "dns_domain": bp["dns_domain"],
+                "disk_size_gb": bp["disk_size_gb"],
+                "cores": bp["cores"],
+                "memory_mb": bp["memory_mb"],
+                "onboot": bp["onboot"],
+                "storage": bp["storage"],
+                "bridge": bp["bridge"],
             }
             await run_windows_provision_task(job_id, params, netbox_vm_id=netbox_vm_id)
         else:
             params = {
                 "hostname": hostname,
-                "template_id": resolved_tpl_id,
-                "node": node,
-                "vmid": int(vmid) if vmid else None,
-                "ip_address": primary_ip,
-                "gateway": ctx_gateway,
-                "dns_server": ctx_dns,
-                "dns_domain": ctx_domain,
-                "disk_size_gb": disk_size_gb or 20,
-                "cores": cores,
-                "memory_mb": memory_mb,
-                "onboot": onboot,
-                "ssh_key": custom_fields.get("ssh_key") or ctx_ssh_keys,
-                "ci_user": ctx_user or "root",
-                "storage": custom_fields.get("storage") or ctx_storage,
-                "bridge": custom_fields.get("bridge") or ctx_bridge,
+                "template_id": bp["template_id"],
+                "node": bp["node"],
+                "vmid": bp["vmid"],
+                "ip_address": bp["primary_ip"],
+                "gateway": bp["gateway"],
+                "dns_server": bp["dns_server"],
+                "dns_domain": bp["dns_domain"],
+                "disk_size_gb": bp["disk_size_gb"],
+                "cores": bp["cores"],
+                "memory_mb": bp["memory_mb"],
+                "onboot": bp["onboot"],
+                "ssh_key": bp["ssh_key"],
+                "ci_user": bp["ci_user"],
+                "storage": bp["storage"],
+                "bridge": bp["bridge"],
             }
             await run_linux_provision_task(job_id, params, netbox_vm_id=netbox_vm_id)
     finally:

@@ -25,12 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added `POST /api/v1/sync/reconcile` REST endpoint for on-demand single-workload or cluster-wide reconciliation passes.
   - Added `metadata` parameter support to `Database.update_job()` for structured job telemetry and execution summaries.
 - **Configurable TLS/SSL Verification**:
-  - Introduced `NETBOX_VERIFY_SSL` across `Settings`, `NetBoxDriver`, preflight diagnostics, and schema bootstrap tooling.
+  - Introduced `NETBOX_VERIFY_SSL` and `UPTIME_KUMA_VERIFY_SSL` across `Settings`, drivers, preflight diagnostics, and schema bootstrap tooling, eliminating all hardcoded `verify=False` occurrences.
 
 ### Security
 - **Fail-Closed Authorization & HMAC Webhook Verification**:
   - Hardened `require_api_key` and `verify_netbox_signature` to strictly fail closed (HTTP 500/401/403) when protection keys or webhook HMAC secrets are unset in production.
-  - Provided explicit, logged `DEBUG=True` bypass exclusively for local development testing.
+  - Decoupled development security bypass from generic debugging; created dedicated, explicitly scoped `AUTH_DEV_BYPASS` flag.
 
 ### Documentation
 - **Controller Appliance Concurrency Architecture**:

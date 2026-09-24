@@ -147,7 +147,8 @@ class PreflightChecker:
             return checks
 
         kuma_url = getattr(settings, "UPTIME_KUMA_URL", None) or os.environ.get("UPTIME_KUMA_URL", "http://172.31.0.1:3001")
-        async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
+        verify_ssl = getattr(settings, "UPTIME_KUMA_VERIFY_SSL", True)
+        async with httpx.AsyncClient(timeout=5.0, verify=verify_ssl) as client:
             try:
                 resp = await client.get(kuma_url)
                 if resp.status_code in (200, 302):

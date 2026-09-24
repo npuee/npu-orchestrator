@@ -252,9 +252,9 @@ Interactive OpenAPI documentation is live at `http://<your-server-ip>:8090/docs`
 ## ❓ Troubleshooting & FAQ
 
 <details>
-<summary><b>1. Proxmox or NetBox SSL certificate errors ("certificate verify failed")</b></summary>
+<summary><b>1. SSL certificate errors ("certificate verify failed")</b></summary>
 <br>
-If your Proxmox server or NetBox instance uses a self-signed SSL certificate, set <code>PROXMOX_VERIFY_SSL=false</code> or <code>NETBOX_VERIFY_SSL=false</code> in <code>.env</code>.
+If your Proxmox server, NetBox instance, or Uptime Kuma uses a self-signed SSL certificate, configure <code>PROXMOX_VERIFY_SSL=false</code>, <code>NETBOX_VERIFY_SSL=false</code>, or <code>UPTIME_KUMA_VERIFY_SSL=false</code> in <code>.env</code>.
 </details>
 
 <details>

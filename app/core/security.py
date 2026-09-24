@@ -13,16 +13,20 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 def verify_netbox_signature(raw_body: bytes, signature_header: Optional[str]) -> bool:
     """
     Validates NetBox webhook HMAC SHA-512 signature using constant-time comparison.
-    Fails closed if NETBOX_WEBHOOK_SECRET is unset (unless DEBUG=True in development).
+    Fails closed if NETBOX_WEBHOOK_SECRET is unset.
+    Can only be bypassed if AUTH_DEV_BYPASS=true is explicitly configured in .env.
     """
     if not settings.NETBOX_WEBHOOK_SECRET:
-        if settings.DEBUG:
-            logger.warning("NETBOX_WEBHOOK_SECRET unset; permitting unverified webhook due to DEBUG=True mode.")
+        if settings.AUTH_DEV_BYPASS:
+            logger.warning("AUTH_DEV_BYPASS is active: permitting unverified webhook without NETBOX_WEBHOOK_SECRET.")
             return True
         logger.error("Rejected NetBox webhook: NETBOX_WEBHOOK_SECRET is not configured in .env (failing closed).")
         return False
     
     if not signature_header:
+        if settings.AUTH_DEV_BYPASS:
+            logger.warning("AUTH_DEV_BYPASS is active: permitting NetBox webhook with missing X-Hook-Signature header.")
+            return True
         logger.warning("Rejected NetBox webhook: missing X-Hook-Signature header.")
         return False
     
@@ -35,11 +39,12 @@ def verify_netbox_signature(raw_body: bytes, signature_header: Optional[str]) ->
 async def require_api_key(api_key: Optional[str] = Security(api_key_header)):
     """
     Validates operator API key for protected routes using constant-time comparison.
-    Fails closed if API_KEY is unset (unless DEBUG=True in development).
+    Fails closed if API_KEY is unset.
+    Can only be bypassed if AUTH_DEV_BYPASS=true is explicitly configured in .env.
     """
     if not settings.API_KEY:
-        if settings.DEBUG:
-            logger.warning("API_KEY unset; permitting request due to DEBUG=True mode.")
+        if settings.AUTH_DEV_BYPASS:
+            logger.warning("AUTH_DEV_BYPASS is active: permitting request without API_KEY.")
             return True
         logger.error("Protected route rejected: API_KEY is not configured in .env (failing closed).")
         raise HTTPException(
@@ -48,6 +53,9 @@ async def require_api_key(api_key: Optional[str] = Security(api_key_header)):
         )
     
     if not api_key or not hmac.compare_digest(api_key, settings.API_KEY):
+        if settings.AUTH_DEV_BYPASS:
+            logger.warning("AUTH_DEV_BYPASS is active: permitting request with invalid or missing API key.")
+            return True
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing API key"

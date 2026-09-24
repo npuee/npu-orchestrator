@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     PORT: int = 8090
     HOST: str = "0.0.0.0"
     API_KEY: Optional[str] = None  # If set, protects manual endpoints via X-API-Key
+    AUTH_DEV_BYPASS: bool = False  # Dedicated developer flag to bypass auth; DO NOT enable in production
 
     # Proxmox VE Settings
     PROXMOX_HOST: str = "192.168.1.100"
@@ -46,6 +47,7 @@ class Settings(BaseSettings):
     UPTIME_KUMA_URL: str = "http://172.31.0.1:3001"
     UPTIME_KUMA_USERNAME: Optional[str] = None
     UPTIME_KUMA_PASSWORD: Optional[str] = None
+    UPTIME_KUMA_VERIFY_SSL: bool = True
 
     # Traefik Sync Settings
     TRAEFIK_SYNC_ENABLED: bool = True

@@ -37,7 +37,8 @@ class UptimeKumaDriver:
         for attempt in range(5):
             api = None
             try:
-                api = UptimeKumaApi(self.url, timeout=30)
+                ssl_verify = getattr(settings, "UPTIME_KUMA_VERIFY_SSL", True)
+                api = UptimeKumaApi(self.url, timeout=30, ssl_verify=ssl_verify)
                 api.login(self.username, self.password)
                 return api
             except Exception as e:

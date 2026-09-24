@@ -78,13 +78,13 @@ class PreflightChecker:
         if settings.API_KEY:
             checks.append({"name": "API Key Protection", "status": "pass", "detail": "API_KEY configured for internal protection"})
         else:
-            checks.append({"name": "API Key Protection", "status": "warn", "detail": "API_KEY is not set (endpoints unprotected)"})
+            checks.append({"name": "API Key Protection", "status": "warn", "detail": "API_KEY is not set (protected endpoints fail-closed)"})
 
         # NetBox Webhook Secret
         if settings.NETBOX_WEBHOOK_SECRET:
             checks.append({"name": "Webhook HMAC Secret", "status": "pass", "detail": "NETBOX_WEBHOOK_SECRET configured"})
         else:
-            checks.append({"name": "Webhook HMAC Secret", "status": "warn", "detail": "NETBOX_WEBHOOK_SECRET not set (signatures unverified)"})
+            checks.append({"name": "Webhook HMAC Secret", "status": "warn", "detail": "NETBOX_WEBHOOK_SECRET not set (webhooks will be rejected)"})
 
         # Uptime Kuma Module (Optional)
         if module_manager.is_enabled("uptime_kuma"):
@@ -119,7 +119,8 @@ class PreflightChecker:
             "Accept": "application/json",
         }
 
-        async with httpx.AsyncClient(timeout=8.0, verify=False) as client:
+        verify_ssl = getattr(settings, "NETBOX_VERIFY_SSL", True)
+        async with httpx.AsyncClient(timeout=8.0, verify=verify_ssl) as client:
             try:
                 resp = await client.get(f"{self.netbox_url}/api/status/", headers=headers)
                 if resp.status_code == 200:

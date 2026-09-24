@@ -7,13 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [0.0.4] - 2026-09-24
 
 ### Added
 - **Declared-State Reconciliation Engine**:
   - Transitioned the orchestration core from an event-driven webhook parser into a continuous Declared-State Reconciliation Engine (`app/workers/reconciler.py`).
   - Implemented typed `WorkloadDeclaredState`, `WorkloadActualState`, and `WorkloadDelta` calculations ($Declared - Actual \rightarrow Action$).
   - Automatically heals silent drift, recovers from dropped or missed webhooks, and aligns power states, hardware specs (cores, RAM, disk), hostnames, and dynamic DNS.
+- **Proxmox Reverse Drift & Orphan Workload Detection**:
+  - Enhanced `reconcile_cluster()` to perform bidirectional drift detection by querying live hypervisor QEMU and LXC workloads against NetBox declarations.
+  - Automatically identifies, flags, and reports unmanaged or orphan workloads in the audit trail, job metadata, and API responses without risk of unintended deletion.
 - **Synchronized Proxmox VMID Allocation & Concurrency Locking**:
   - Implemented thread-safe `_vmid_lock` and in-memory VMID reservation tracking in `ProxmoxClientManager` to eliminate race conditions from concurrent creations.
   - Guarantees strictly sequential, collision-free VMID allocation across parallel QEMU and LXC provisioning tasks.
@@ -21,6 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Registered `state_reconciler` periodic runner in `BackgroundScheduler` (default: every 15 minutes) to continuously monitor and self-heal managed cluster workloads.
   - Added `POST /api/v1/sync/reconcile` REST endpoint for on-demand single-workload or cluster-wide reconciliation passes.
   - Added `metadata` parameter support to `Database.update_job()` for structured job telemetry and execution summaries.
+- **Configurable TLS/SSL Verification**:
+  - Introduced `NETBOX_VERIFY_SSL` across `Settings`, `NetBoxDriver`, preflight diagnostics, and schema bootstrap tooling.
+
+### Security
+- **Fail-Closed Authorization & HMAC Webhook Verification**:
+  - Hardened `require_api_key` and `verify_netbox_signature` to strictly fail closed (HTTP 500/401/403) when protection keys or webhook HMAC secrets are unset in production.
+  - Provided explicit, logged `DEBUG=True` bypass exclusively for local development testing.
+
+### Documentation
+- **Controller Appliance Concurrency Architecture**:
+  - Documented single-instance controller architecture, thread-safe in-process VMID reservation locks, and distributed multi-replica boundary constraints.
 
 ### Changed
 - **Lightweight Ingress Webhook Dispatcher**:

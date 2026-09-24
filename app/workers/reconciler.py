@@ -982,10 +982,22 @@ class ReconciliationEngine:
             synced_count = 0
             reconciled_count = 0
             failed_count = 0
+            declared_vmids: Set[int] = set()
+            declared_names: Set[str] = set()
 
             for vm_data in vms:
                 vm_id = vm_data.get("id")
                 vm_name = vm_data.get("name", f"vm_{vm_id}")
+                if vm_name:
+                    declared_names.add(vm_name.strip().lower())
+                cf = vm_data.get("custom_fields") or {}
+                raw_vmid = cf.get("proxmox_vmid")
+                if raw_vmid:
+                    try:
+                        declared_vmids.add(int(raw_vmid))
+                    except (ValueError, TypeError):
+                        pass
+
                 try:
                     res = await self.reconcile_workload(
                         netbox_vm_id=vm_id,
@@ -997,6 +1009,12 @@ class ReconciliationEngine:
                         synced_count += 1
                     else:
                         reconciled_count += 1
+
+                    # Track actual VMID if resolved
+                    actual_info = res.get("actual") or {}
+                    if actual_info.get("vmid"):
+                        declared_vmids.add(int(actual_info["vmid"]))
+
                     results.append({"vm_id": vm_id, "name": vm_name, "result": res})
                 except Exception as exc:
                     failed_count += 1
@@ -1004,17 +1022,69 @@ class ReconciliationEngine:
                     await db.append_log(job_id, f"ERROR reconciling VM '{vm_name}' (#{vm_id}): {exc}")
                     results.append({"vm_id": vm_id, "name": vm_name, "error": str(exc)})
 
+            # 2. Reverse Drift Pass: Detect unmanaged Proxmox workloads with no NetBox record (orphans)
+            orphans: List[Dict[str, Any]] = []
+            try:
+                loop = asyncio.get_running_loop()
+                def _get_live_resources():
+                    pve = proxmox_driver.get_client()
+                    return pve.cluster.resources.get(type="vm")
+
+                raw_resources = await loop.run_in_executor(None, _get_live_resources)
+                templates_cfg = app_config.templates if app_config else {}
+                linux_prefix = str(templates_cfg.get("linux_vmid_prefix", "90"))
+                windows_prefix = str(templates_cfg.get("windows_vmid_prefix", "92"))
+
+                for r in raw_resources:
+                    vmid = r.get("vmid")
+                    if not vmid:
+                        continue
+                    # Skip blueprints and templates
+                    if r.get("template", 0) == 1:
+                        continue
+                    vmid_str = str(vmid)
+                    if vmid_str.startswith(linux_prefix) or vmid_str.startswith(windows_prefix):
+                        continue
+
+                    name_str = (r.get("name") or "").strip().lower()
+                    vm_type = r.get("type", "qemu")
+                    node = r.get("node", "unknown")
+                    pve_status = r.get("status", "unknown")
+
+                    if int(vmid) not in declared_vmids and name_str not in declared_names:
+                        orphan_entry = {
+                            "vmid": int(vmid),
+                            "name": r.get("name", f"unnamed_{vmid}"),
+                            "type": vm_type,
+                            "node": node,
+                            "status": pve_status,
+                        }
+                        orphans.append(orphan_entry)
+                        logger.warning(
+                            "Detected unmanaged orphan workload in Proxmox: '%s' (VMID: %d, Type: %s, Node: %s, Status: %s) with no NetBox record",
+                            r.get("name"), int(vmid), vm_type, node, pve_status,
+                        )
+                        await db.append_log(
+                            job_id,
+                            f"DRIFT WARNING: Detected unmanaged/orphan Proxmox workload: '{r.get('name')}' (VMID: {vmid}, Type: {vm_type}, Node: {node}, Status: {pve_status}) - No NetBox record found.",
+                        )
+            except Exception as pve_err:
+                logger.warning("Failed to perform Proxmox orphan drift scan: %s", pve_err)
+                await db.append_log(job_id, f"WARNING: Proxmox orphan scan failed: {pve_err}")
+
             summary = {
                 "cluster_id": target_cluster_id,
                 "total_workloads": len(vms),
                 "in_sync": synced_count,
                 "reconciled": reconciled_count,
                 "failed": failed_count,
+                "orphan_count": len(orphans),
+                "orphans": orphans,
                 "details": results,
             }
             await db.append_log(
                 job_id,
-                f"Cluster reconciliation pass complete: {synced_count} in sync, {reconciled_count} reconciled/actioned, {failed_count} errors.",
+                f"Cluster reconciliation pass complete: {synced_count} in sync, {reconciled_count} reconciled/actioned, {len(orphans)} orphans detected, {failed_count} errors.",
             )
             await db.update_job(job_id, status="completed", metadata=summary)
             return summary

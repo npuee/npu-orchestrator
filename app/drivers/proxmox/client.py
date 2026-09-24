@@ -12,7 +12,17 @@ logger = logging.getLogger("orchestrator.proxmox.client")
 
 
 class ProxmoxClientManager:
-    """Manages Proxmox API client pooling, authentication, task monitoring, and node resolution."""
+    """
+    Manages Proxmox API client pooling, authentication, task monitoring, and node resolution.
+
+    CONCURRENCY & DEPLOYMENT ARCHITECTURE:
+    The orchestrator is architected as a single-instance controller appliance.
+    In-process reservation locking (`_vmid_lock` and `_reserved_vmids`) guarantees thread-safety
+    and race-free sequential VMID allocation across concurrent QEMU and LXC tasks within
+    the running appliance instance. If operating multiple orchestrator replicas concurrently
+    behind a load balancer, external distributed coordination (e.g., Redis or DB advisory locks)
+    would be required to synchronize reservations across separate process memories.
+    """
 
     def __init__(self):
         self._pve: Optional[ProxmoxAPI] = None

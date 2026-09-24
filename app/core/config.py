@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     NETBOX_URL: Optional[str] = None
     NETBOX_TOKEN: Optional[str] = None
     NETBOX_WEBHOOK_SECRET: Optional[str] = None  # For HMAC validation
+    NETBOX_VERIFY_SSL: bool = True
 
     # Signal Notifications
     SIGNAL_ENABLED: bool = True

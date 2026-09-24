@@ -35,8 +35,8 @@ fallbacks:
 
 # ── Declared-State Reconciliation Engine ──────────────────────────────────────
 # Continuously compares Declared State (NetBox) against Actual State (Proxmox).
-# Periodically heals silent drift, recovers from dropped webhooks, and aligns
-# power states, hardware specs, and DNS records automatically.
+# Periodically heals silent drift, recovers from dropped webhooks, detects unmanaged
+# orphan Proxmox workloads, and aligns power states, hardware specs, and DNS records.
 reconciler:
   enabled: true                     # Enable periodic safety-net reconciliation
   interval_minutes: 15              # Safety-net sweep interval (default: 15 minutes)

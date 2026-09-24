@@ -1,22 +1,29 @@
 import hmac
 import hashlib
+import logging
 from typing import Optional
 from fastapi import HTTPException, Security, status, Header
 from fastapi.security.api_key import APIKeyHeader
 from app.core.config import settings
 
+logger = logging.getLogger("orchestrator.security")
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
 def verify_netbox_signature(raw_body: bytes, signature_header: Optional[str]) -> bool:
     """
     Validates NetBox webhook HMAC SHA-512 signature using constant-time comparison.
-    If no secret is configured, passes through.
+    Fails closed if NETBOX_WEBHOOK_SECRET is unset (unless DEBUG=True in development).
     """
     if not settings.NETBOX_WEBHOOK_SECRET:
-        return True
+        if settings.DEBUG:
+            logger.warning("NETBOX_WEBHOOK_SECRET unset; permitting unverified webhook due to DEBUG=True mode.")
+            return True
+        logger.error("Rejected NetBox webhook: NETBOX_WEBHOOK_SECRET is not configured in .env (failing closed).")
+        return False
     
     if not signature_header:
+        logger.warning("Rejected NetBox webhook: missing X-Hook-Signature header.")
         return False
     
     secret_bytes = settings.NETBOX_WEBHOOK_SECRET.encode("utf-8")
@@ -27,11 +34,18 @@ def verify_netbox_signature(raw_body: bytes, signature_header: Optional[str]) ->
 
 async def require_api_key(api_key: Optional[str] = Security(api_key_header)):
     """
-    Optional API Key check for manual provisioning routes.
-    If settings.API_KEY is unset, all requests are allowed.
+    Validates operator API key for protected routes using constant-time comparison.
+    Fails closed if API_KEY is unset (unless DEBUG=True in development).
     """
     if not settings.API_KEY:
-        return True
+        if settings.DEBUG:
+            logger.warning("API_KEY unset; permitting request due to DEBUG=True mode.")
+            return True
+        logger.error("Protected route rejected: API_KEY is not configured in .env (failing closed).")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Server security misconfiguration: API_KEY is not configured in .env"
+        )
     
     if not api_key or not hmac.compare_digest(api_key, settings.API_KEY):
         raise HTTPException(

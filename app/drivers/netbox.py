@@ -19,7 +19,9 @@ class NetBoxDriver:
     def _get_client(self) -> httpx.AsyncClient:
         """Returns a shared, pooled httpx.AsyncClient with HTTP Keep-Alive connection pooling."""
         if self._client is None or self._client.is_closed:
+            verify_ssl = getattr(settings, "NETBOX_VERIFY_SSL", True)
             self._client = httpx.AsyncClient(
+                verify=verify_ssl,
                 timeout=httpx.Timeout(15.0, connect=5.0),
                 limits=httpx.Limits(
                     max_keepalive_connections=10,

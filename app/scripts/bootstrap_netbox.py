@@ -137,11 +137,12 @@ DEFAULT_LXC_TYPES = [
 
 
 class NetBoxSanityChecker:
-    def __init__(self, netbox_url: str, netbox_token: str, webhook_url: Optional[str] = None, webhook_secret: Optional[str] = None):
+    def __init__(self, netbox_url: str, netbox_token: str, webhook_url: Optional[str] = None, webhook_secret: Optional[str] = None, verify_ssl: bool = True):
         self.url = netbox_url.rstrip("/")
         self.token = netbox_token
         self.webhook_url = webhook_url
         self.webhook_secret = webhook_secret
+        self.verify_ssl = verify_ssl
         self.headers = {
             "Authorization": f"Token {self.token}",
             "Content-Type": "application/json",
@@ -167,7 +168,7 @@ class NetBoxSanityChecker:
             print("               NETBOX SCHEMA & CONFIGURATION AUDIT")
             print("======================================================================")
 
-        async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=15.0, verify=self.verify_ssl) as client:
             # 1. Connection Check
             status_resp = await client.get(f"{self.url}/api/status/", headers=self.headers)
             if status_resp.status_code != 200:
@@ -672,7 +673,8 @@ async def main():
     check_only = "--check-only" in sys.argv or "--check" in sys.argv
     summary_mode = "--summary" in sys.argv
 
-    checker = NetBoxSanityChecker(netbox_url, netbox_token, webhook_url, webhook_secret)
+    verify_ssl_env = os.environ.get("NETBOX_VERIFY_SSL", "true").strip().lower() in ("true", "1", "yes")
+    checker = NetBoxSanityChecker(netbox_url, netbox_token, webhook_url, webhook_secret, verify_ssl=verify_ssl_env)
     ids = await checker.run_sanity_and_sync(check_only=check_only, summary_mode=summary_mode)
     update_config_yml(ids)
 

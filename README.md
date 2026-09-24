@@ -8,11 +8,9 @@
 [![NetBox](https://img.shields.io/badge/NetBox-4.x-004D40.svg?style=flat&logo=netbox&logoColor=white)](https://netboxlabs.com)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg?style=flat&logo=docker&logoColor=white)](https://docker.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.0.3-green.svg)](app/__init__.py)
+[![Version](https://img.shields.io/badge/version-0.0.4-green.svg)](app/__init__.py)
 
 ---
-
-
 
 ## ⚡ 3-Minute Quickstart
 
@@ -247,15 +245,16 @@ Interactive OpenAPI documentation is live at `http://<your-server-ip>:8090/docs`
 | `POST` | `/api/v1/sync/metrics` | Pulls live CPU/RAM/Disk metrics from Proxmox into NetBox |
 | `POST` | `/api/v1/sync/traefik` | Synchronizes Traefik ingress routes to NetBox services |
 | `POST` | `/api/v1/sync/uptime-kuma` | Synchronizes NetBox devices to Uptime Kuma monitors |
+| `POST` | `/api/v1/sync/reconcile` | Runs on-demand declared-state reconciliation and orphan workload scan |
 
 ---
 
 ## ❓ Troubleshooting & FAQ
 
 <details>
-<summary><b>1. Proxmox SSL certificate errors ("certificate verify failed")</b></summary>
+<summary><b>1. Proxmox or NetBox SSL certificate errors ("certificate verify failed")</b></summary>
 <br>
-If your Proxmox server uses a self-signed SSL certificate, ensure <code>PROXMOX_VERIFY_SSL=false</code> is set in <code>.env</code>.
+If your Proxmox server or NetBox instance uses a self-signed SSL certificate, set <code>PROXMOX_VERIFY_SSL=false</code> or <code>NETBOX_VERIFY_SSL=false</code> in <code>.env</code>.
 </details>
 
 <details>
@@ -282,6 +281,18 @@ Provisioning task logs are also stored in SQLite (WAL mode) and accessible via t
 <br>
 After modifying <code>config.yml</code> or <code>.env</code>, apply changes instantly with:
 <pre><code>docker compose restart orchestrator</code></pre>
+</details>
+
+<details>
+<summary><b>5. Can the orchestrator run across multiple concurrent instances?</b></summary>
+<br>
+The orchestrator is architected as an active-passive / single-instance controller appliance. In-process VMID reservation locks and sequential reconciliation sweeps guarantee collision-free provisioning within the appliance instance. Running multiple active replicas behind a load balancer would require external distributed locking (e.g. Redis).
+</details>
+
+<details>
+<summary><b>6. How does orphan / unmanaged workload drift detection work?</b></summary>
+<br>
+During scheduled reconciliation passes (and via <code>POST /api/v1/sync/reconcile</code>), the engine queries live Proxmox workloads and compares them against NetBox. Any live VM or container with no corresponding NetBox record (excluding templates) is reported as an unmanaged orphan in the audit log and API response, allowing operators to safely adopt or clean up drift without risking unintended deletion.
 </details>
 
 ---
